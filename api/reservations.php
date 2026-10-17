@@ -20,9 +20,11 @@ if ($method === 'GET') {
         $where[] = 'book_id = ?';
         $params[] = $bookId;
     }
-    $sql = 'SELECT * FROM reservations WHERE ' . implode(' AND ', $where) . ' ORDER BY created_at DESC';
+    [$limit, $offset] = paginationParams(200, 500);
+    $total = countRows($pdo, 'SELECT COUNT(*) FROM reservations WHERE ' . implode(' AND ', $where), $params);
+    $sql = 'SELECT * FROM reservations WHERE ' . implode(' AND ', $where) . ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?';
     $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
+    $stmt->execute(array_merge($params, [$limit, $offset]));
     $rows = array_map(static function ($row) {
         return [
             'id' => $row['id'],
@@ -32,7 +34,7 @@ if ($method === 'GET') {
             'createdAt' => $row['created_at'],
         ];
     }, $stmt->fetchAll());
-    sendResponse(['reservations' => $rows]);
+    sendResponse(['reservations' => $rows, 'total' => $total, 'limit' => $limit, 'offset' => $offset]);
 }
 
 if ($method !== 'POST') {
@@ -55,6 +57,7 @@ try {
     if ($action === 'cancel') {
         $pdo->prepare("UPDATE reservations SET status = 'cancelled' WHERE book_id = ? AND user_id = ? AND status = 'active'")
             ->execute([$bookId, $userId]);
+        auditLog($pdo, 'reservation.cancel', 'book', (string)$bookId, ['userId' => (string)$userId]);
         $pdo->commit();
         sendResponse(['message' => 'Reservation cancelled.']);
     }
@@ -86,6 +89,7 @@ try {
     $id = nextReservationId($pdo);
     $pdo->prepare('INSERT INTO reservations (id, book_id, user_id, status) VALUES (?, ?, ?, ?)')
         ->execute([$id, $bookId, $userId, 'active']);
+    auditLog($pdo, 'reservation.create', 'book', (string)$bookId, ['reservationId' => $id, 'userId' => (string)$userId]);
     $pdo->commit();
     sendResponse(['message' => 'Reservation placed.', 'id' => $id], 201);
 } catch (Throwable $e) {

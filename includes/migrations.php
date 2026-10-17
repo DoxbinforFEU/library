@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/schema_guard.php';
 
 /** Id of the newest migration. Requests refuse to run until this one is recorded. */
-const MIGRATION_LATEST = '005_open_loan_guard';
+const MIGRATION_LATEST = '008_drop_redundant_indexes';
 
 function tableExists(PDO $pdo, string $table): bool {
     $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
@@ -163,6 +163,59 @@ function migrationList(): array {
                 }
                 if (!indexExists($pdo, 'transactions', 'uk_tx_open_book')) {
                     $pdo->exec('CREATE UNIQUE INDEX uk_tx_open_book ON transactions (open_book_id)');
+                }
+            },
+        ],
+        [
+            'id' => '006_audit_log',
+            'title' => 'Audit trail table (who did what, when). Adds one new table; no existing data is touched',
+            'preflight' => fn(PDO $pdo): array => [],
+            'apply' => function (PDO $pdo): void {
+                $pdo->exec("CREATE TABLE IF NOT EXISTS audit_log (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    actor_id INT NULL,
+                    actor_name VARCHAR(255) NULL,
+                    action VARCHAR(40) NOT NULL,
+                    entity_type VARCHAR(20) NULL,
+                    entity_id VARCHAR(40) NULL,
+                    details TEXT NULL,
+                    ip VARCHAR(45) NULL,
+                    INDEX idx_audit_created (created_at),
+                    INDEX idx_audit_entity (entity_type, entity_id),
+                    INDEX idx_audit_actor (actor_id, created_at),
+                    INDEX idx_audit_action (action, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            },
+        ],
+        [
+            'id' => '007_fine_payments',
+            'title' => 'Fine payment state: transactions.fine_paid_at (NULL = unpaid). Existing fines start UNPAID',
+            'preflight' => fn(PDO $pdo): array => [],
+            'apply' => function (PDO $pdo): void {
+                if (!columnExists($pdo, 'transactions', 'fine_paid_at')) {
+                    $pdo->exec('ALTER TABLE transactions ADD COLUMN fine_paid_at DATETIME NULL');
+                }
+                if (!indexExists($pdo, 'transactions', 'idx_tx_unpaid')) {
+                    $pdo->exec('CREATE INDEX idx_tx_unpaid ON transactions (user_id, status, fine_paid_at)');
+                }
+            },
+        ],
+        [
+            'id' => '008_drop_redundant_indexes',
+            'title' => 'Drop two redundant indexes (idx_book_id is a prefix of idx_tx_book_status; idx_type has ~1 distinct value)',
+            'preflight' => function (PDO $pdo): array {
+                // Only drop idx_book_id if the covering index exists, so the book_id foreign key keeps an index.
+                if (indexExists($pdo, 'transactions', 'idx_book_id') && !indexExists($pdo, 'transactions', 'idx_tx_book_status')) {
+                    return ['idx_tx_book_status is missing; run migration 001 first'];
+                }
+                return [];
+            },
+            'apply' => function (PDO $pdo): void {
+                foreach (['idx_book_id', 'idx_type'] as $ix) {
+                    if (indexExists($pdo, 'transactions', $ix)) {
+                        $pdo->exec("ALTER TABLE transactions DROP INDEX `$ix`");
+                    }
                 }
             },
         ],

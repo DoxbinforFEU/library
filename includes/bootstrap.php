@@ -149,15 +149,33 @@ try {
     error_log('[feu-library] db connect: ' . $e->getMessage());
     $driverError = (int)($e->errorInfo[1] ?? 0);
     if (in_array($driverError, [2002, 2003], true)) {
-        sendError('MySQL is unreachable at the configured DB_HOST/DB_PORT. Start MySQL in XAMPP and review its error log.', 503);
+        sendError($IS_DEVELOPMENT
+            ? 'MySQL is unreachable at the configured DB_HOST/DB_PORT. Start MySQL in XAMPP and review its error log.'
+            : 'Service temporarily unavailable.', 503);
     }
     if (stripos($e->getMessage(), 'could not find driver') !== false) {
-        sendError('PHP PDO MySQL support is not enabled. Enable pdo_mysql in the XAMPP PHP configuration.', 500);
+        sendError($IS_DEVELOPMENT
+            ? 'PHP PDO MySQL support is not enabled. Enable pdo_mysql in the XAMPP PHP configuration.'
+            : 'Server configuration is incomplete.', 500);
     }
-    sendError('Database connection failed. Verify DB_* settings and the PHP error log.', 500);
+    sendError($IS_DEVELOPMENT
+        ? 'Database connection failed. Verify DB_* settings and the PHP error log.'
+        : 'Service temporarily unavailable.', $IS_DEVELOPMENT ? 500 : 503);
 }
 
 require_once __DIR__ . '/validation.php';
 require_once __DIR__ . '/domain.php';
 require_once __DIR__ . '/auth.php';
+
+// Production serves the API over HTTPS only (set ALLOW_INSECURE_HTTP=1 to override, e.g. an internal-only test).
+// TLS behind a reverse proxy: list the proxy's IP in TRUSTED_PROXIES so its X-Forwarded-Proto is believed.
+if ($IS_PRODUCTION && PHP_SAPI !== 'cli') {
+    if (!isHttps()) {
+        if (getenv('ALLOW_INSECURE_HTTP') !== '1') {
+            sendError('HTTPS is required.', 403);
+        }
+    } elseif (!headers_sent()) {
+        header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+    }
+}
 assertSameOrigin();

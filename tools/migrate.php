@@ -43,6 +43,11 @@ try {
         $out("  books marked on loan with no open loan record: $stale");
     }
 
+    if ($dryRun && tableExists($pdo, 'transactions')) {
+        $fines = (int)$pdo->query("SELECT COUNT(*) FROM transactions WHERE type = 'issue' AND status = 'Returned' AND fine > 0")->fetchColumn();
+        $out("  returned loans with a fine (they start as UNPAID after migration 007): $fines");
+    }
+
     $out('Migrations:');
     $result = runMigrations($pdo, $dryRun, $out);
 

@@ -4,6 +4,14 @@ require __DIR__ . '/../config.php';
 $method = requestMethod();
 $actor = requireAuth();
 
+/** Same as fetchBook() plus the borrow count the list endpoint returns (never use with FOR UPDATE). */
+function fetchBookWithCount(PDO $pdo, string $id): ?array {
+    $stmt = $pdo->prepare("SELECT b.*, (SELECT COUNT(*) FROM transactions t WHERE t.book_id = b.id AND t.type = 'issue') AS borrow_count
+        FROM books b WHERE b.id = ? AND b.deleted_at IS NULL");
+    $stmt->execute([$id]);
+    return $stmt->fetch() ?: null;
+}
+
 function fetchBook(PDO $pdo, string $id, bool $forUpdate = false): ?array {
     $sql = 'SELECT * FROM books WHERE id = ? AND deleted_at IS NULL' . ($forUpdate ? ' FOR UPDATE' : '');
     $stmt = $pdo->prepare($sql);
@@ -15,7 +23,7 @@ function fetchBook(PDO $pdo, string $id, bool $forUpdate = false): ?array {
 if ($method === 'GET') {
     $id = getQueryParam('id');
     if ($id) {
-        $row = fetchBook($pdo, (string)$id);
+        $row = fetchBookWithCount($pdo, (string)$id);
         if (!$row) {
             sendError('Book not found', 404);
         }
@@ -145,12 +153,13 @@ function updateBookRow(PDO $pdo, string $id, array $data): void {
 
     $params[] = $id;
     $pdo->prepare('UPDATE books SET ' . implode(', ', $fields) . ' WHERE id = ? AND deleted_at IS NULL')->execute($params);
-    $get = fetchBook($pdo, $id);
+    $get = fetchBookWithCount($pdo, $id);
+    auditLogQuiet($pdo, 'book.update', 'book', $id, ['title' => $get['title'] ?? null, 'fields' => auditFieldNames($fields)]);
     sendResponse(['message' => 'Book updated successfully', 'book' => mapBook($get)]);
 }
 
 if ($method === 'POST') {
-    requireLibrarian();
+    requireStaff($actor);
     $data = getJsonBody();
     $errors = requireFields($data, ['title', 'author']);
     $title = validateStringLength($data['title'] ?? '', 1, 255, 'title', $errors);
@@ -190,6 +199,7 @@ if ($method === 'POST') {
             $format,
             $cover,
         ]);
+        auditLog($pdo, 'book.create', 'book', $newId, ['title' => $title]);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
@@ -198,7 +208,7 @@ if ($method === 'POST') {
         throw $e;
     }
 
-    $get = fetchBook($pdo, $newId);
+    $get = fetchBookWithCount($pdo, $newId);
     sendResponse([
         'message' => 'Book created successfully',
         'id' => $newId,
@@ -207,7 +217,7 @@ if ($method === 'POST') {
 }
 
 if ($method === 'PUT') {
-    requireLibrarian();
+    requireStaff($actor);
     $data = getJsonBody();
     $id = getQueryParam('id') ?: ($data['id'] ?? null);
     if (!$id) {
@@ -217,20 +227,39 @@ if ($method === 'PUT') {
 }
 
 if ($method === 'DELETE') {
-    requireLibrarian();
+    requireStaff($actor);
     $id = getQueryParam('id');
     if (!$id) {
         sendError('Book ID is required', 400);
     }
-    $book = fetchBook($pdo, (string)$id);
-    if (!$book) {
-        sendError('Book not found', 404);
+    // Lock the row so a concurrent issue cannot slip in between the loan check and the delete.
+    $pdo->beginTransaction();
+    try {
+        $book = fetchBook($pdo, (string)$id, true);
+        if (!$book) {
+            $pdo->rollBack();
+            sendError('Book not found', 404);
+        }
+        $status = effectiveLoanStatus($book['status'], $book['due_date'] ?? null);
+        if (in_array($status, ['Borrowed', 'Overdue'], true)) {
+            $pdo->rollBack();
+            sendError('Cannot delete a book that is currently on loan', 400);
+        }
+        $pdo->prepare('UPDATE books SET deleted_at = NOW() WHERE id = ?')->execute([$id]);
+        // A deleted title can no longer be collected, so its waiting list is cancelled in the same transaction.
+        $cancel = $pdo->prepare("UPDATE reservations SET status = 'cancelled' WHERE book_id = ? AND status = 'active'");
+        $cancel->execute([$id]);
+        auditLog($pdo, 'book.delete', 'book', (string)$id, ['title' => $book['title'], 'cancelledReservations' => $cancel->rowCount()]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($e instanceof PDOException && in_array((int)($e->errorInfo[1] ?? 0), [1205, 1213], true)) {
+            sendError('That record is busy. Please try again.', 409);
+        }
+        throw $e;
     }
-    $status = effectiveLoanStatus($book['status'], $book['due_date'] ?? null);
-    if (in_array($status, ['Borrowed', 'Overdue'], true)) {
-        sendError('Cannot delete a book that is currently on loan', 400);
-    }
-    $pdo->prepare('UPDATE books SET deleted_at = NOW() WHERE id = ?')->execute([$id]);
     sendResponse(['message' => 'Book deleted successfully']);
 }
 

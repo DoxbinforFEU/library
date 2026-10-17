@@ -14,7 +14,8 @@ if ($method === 'GET') {
 
 if ($method === 'PUT' || $method === 'POST') {
     $data = getJsonBody();
-    if (($data['action'] ?? '') === 'reset') {
+    $isReset = (($data['action'] ?? '') === 'reset');
+    if ($isReset) {
         $data = [
             'finePerDay' => 10,
             'loanDays' => 7,
@@ -57,6 +58,11 @@ if ($method === 'PUT' || $method === 'POST') {
         'libraryAddress' => ['library_address', 'str'],
     ];
 
+    // Upper bounds keep absurd values from breaking date maths / DECIMAL(10,2) / VARCHAR(20) columns.
+    $maxInt = ['loanDays' => 365, 'maxBooksPerUser' => 100, 'maxRenewals' => 20, 'gracePeriodDays' => 365, 'pageSize' => 100];
+    $maxFine = 10000;
+    $maxLen = ['libraryName' => 255, 'libraryPhone' => 20, 'libraryAddress' => 500];
+
     $fields = [];
     $params = [];
     foreach ($fieldMap as $camel => [$col, $kind]) {
@@ -65,15 +71,16 @@ if ($method === 'PUT' || $method === 'POST') {
         }
         $value = $data[$camel];
         if ($kind === 'number') {
-            if (!is_numeric($value) || (float)$value < 0) {
-                $errors[$camel] = 'Must be 0 or more.';
+            if (!is_numeric($value) || !is_finite((float)$value) || (float)$value < 0 || (float)$value > $maxFine) {
+                $errors[$camel] = "Must be between 0 and {$maxFine}.";
                 continue;
             }
             $value = round((float)$value, 2);
         } elseif ($kind === 'int') {
             $min = in_array($camel, ['maxRenewals', 'gracePeriodDays'], true) ? 0 : 1;
-            if (!is_numeric($value) || (int)$value < $min) {
-                $errors[$camel] = "Must be {$min} or more.";
+            $max = $maxInt[$camel] ?? PHP_INT_MAX;
+            if (!is_numeric($value) || !is_finite((float)$value) || (float)$value < $min || (float)$value > $max) {
+                $errors[$camel] = $max === PHP_INT_MAX ? "Must be {$min} or more." : "Must be between {$min} and {$max}.";
                 continue;
             }
             $value = (int)$value;
@@ -105,7 +112,7 @@ if ($method === 'PUT' || $method === 'POST') {
             $value = 'en';
         } elseif ($kind === 'str') {
             $required = $camel === 'libraryName';
-            $value = validateStringLength($value, $required ? 2 : 0, 255, $camel, $errors, $required);
+            $value = validateStringLength($value, $required ? 2 : 0, $maxLen[$camel] ?? 255, $camel, $errors, $required);
             if ($value === '' && !$required) {
                 $value = null;
             }
@@ -122,7 +129,12 @@ if ($method === 'PUT' || $method === 'POST') {
     }
 
     $params[] = 1;
+    $before = loadSettings($pdo);
     $pdo->prepare('UPDATE settings SET ' . implode(', ', $fields) . ' WHERE id = ?')->execute($params);
+    $diff = auditDiff($before, loadSettings($pdo));
+    if ($diff || $isReset) {
+        auditLogQuiet($pdo, $isReset ? 'settings.reset' : 'settings.update', 'settings', '1', ['changes' => $diff]);
+    }
     sendResponse([
         'message' => 'Settings updated successfully',
         'settings' => loadSettings($pdo),

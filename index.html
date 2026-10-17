@@ -4,22 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FEU Roosevelt Library — Administration</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="style.css">
-<script>
-(function(){
-    try{
-      var pref = localStorage.getItem("feu-theme") || "light";
-      var dark = pref === "dark" || (pref === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-      if(dark) document.documentElement.setAttribute("data-theme","dark");
-      document.documentElement.setAttribute("data-theme-pref", pref);
-    }catch(e){}
-})();
-</script>
+<script src="js/theme-init.js"></script>
 </head>
 <body>
+<noscript><p style="padding:24px;font-family:sans-serif;">The FEU Roosevelt Library dashboard needs JavaScript. Enable it in your browser and reload.</p></noscript>
 
 <!-- ============================================================
      LOADING SEQUENCE
@@ -33,7 +23,7 @@
   <div class="loader-sub" id="loader-sub">There is always something worth discovering</div>
 </div>
 
-<main class="login-screen" id="login-screen" hidden aria-labelledby="login-title">
+<section class="login-screen" id="login-screen" hidden aria-labelledby="login-title">
   <section class="login-card">
     <p class="login-kicker">FEU Roosevelt · Library</p>
     <h1 id="login-title">Staff sign in</h1>
@@ -52,12 +42,13 @@
     </form>
     <p class="login-note">Administrator access is required. Contact your system administrator if you need an account.</p>
   </section>
-</main>
+</section>
 
 <!-- ============================================================
      APP SHELL
      ============================================================ -->
 <div id="app">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <div class="nav-overlay" id="nav-overlay"></div>
 
   <div class="shell">
@@ -114,7 +105,7 @@
         <div class="header-actions">
           <label class="search-global" for="global-search">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-            <input id="global-search" type="text" placeholder="Search books, authors, subjects…" autocomplete="off">
+            <input id="global-search" type="text" placeholder="Search books, authors, subjects…" autocomplete="off" aria-label="Search books, authors, subjects">
           </label>
           <button class="icon-btn search-toggle" id="search-toggle-btn" aria-label="Search" aria-expanded="false" aria-controls="global-search">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
@@ -152,7 +143,7 @@
     </header>
 
     <div class="main">
-      <main class="view-port" id="view-port">
+      <main class="view-port" id="main-content" tabindex="-1">
 
         <!-- ========================= DASHBOARD ========================= -->
         <section class="view active" id="view-dashboard" data-view="dashboard">
@@ -318,7 +309,7 @@
             <div class="collection-hero-top">
               <div class="collection-hero-copy">
                 <div class="view-eyebrow">Module 01 &middot; Catalog</div>
-                <h2 class="collection-hero-heading" id="books-hero-heading">Explore the collection</h2>
+                <h1 class="collection-hero-heading" id="books-hero-heading">Explore the collection</h1>
                 <p class="collection-hero-sub" id="books-hero-sub">Find stories, ideas, and perspectives across the FEU Roosevelt Library.</p>
               </div>
             </div>
@@ -452,7 +443,7 @@
           <div class="view-head">
             <div>
               <div class="view-eyebrow">Module 02</div>
-              <h2 class="view-heading">Users</h2>
+              <h1 class="view-heading">Users</h1>
               <p class="view-sub" id="users-count-sub">&mdash; registered patrons</p>
             </div>
             <div class="view-actions">
@@ -485,7 +476,7 @@
             <table class="data-table" id="users-table">
               <thead>
                 <tr>
-                  <th>Student ID</th><th>Name</th><th>Program</th><th>Year</th><th>Books</th><th>Status</th><th>Actions</th>
+                  <th scope="col">Student ID</th><th scope="col">Name</th><th scope="col">Program</th><th scope="col">Year</th><th scope="col">Books</th><th scope="col">Status</th><th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody id="users-tbody"></tbody>
@@ -505,85 +496,55 @@
           <div class="view-head">
             <div>
               <div class="view-eyebrow">Module 03</div>
-              <h2 class="view-heading">Issue a Book</h2>
-              <p class="view-sub">Select a student, choose an available title, and confirm the loan.</p>
+              <h1 class="view-heading">Issue a Book</h1>
+              <p class="view-sub">Find a student, pick an available title, then confirm the loan.</p>
             </div>
+            <p class="issue-kbd"><kbd>&uarr;</kbd> <kbd>&darr;</kbd> move &middot; <kbd>Enter</kbd> select &middot; <kbd>Esc</kbd> clear &middot; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> issue</p>
           </div>
 
-          <div class="wizard">
-            <div class="wizard-rail" id="issue-rail">
-              <div class="wizard-step current" data-step="1">
-                <div class="ws-num">01</div><div class="ws-line"></div>
-                <div><div class="ws-title">Select Student</div><div class="ws-desc">Find the borrower</div></div>
-              </div>
-              <div class="wizard-step" data-step="2">
-                <div class="ws-num">02</div><div class="ws-line"></div>
-                <div><div class="ws-title">Select Book</div><div class="ws-desc">Check availability</div></div>
-              </div>
-              <div class="wizard-step" data-step="3">
-                <div class="ws-num">03</div><div class="ws-line"></div>
-                <div><div class="ws-title">Confirm Details</div><div class="ws-desc">Issue &amp; due dates</div></div>
-              </div>
-              <div class="wizard-step" data-step="4">
-                <div class="ws-num">04</div><div class="ws-line"></div>
-                <div><div class="ws-title">Issue Book</div><div class="ws-desc">Confirmation</div></div>
-              </div>
-            </div>
-
-            <div class="wizard-panel card" style="padding:24px;">
-              <div class="wz-stage active" id="issue-stage-1">
-                <label class="search-field pick-search" for="issue-student-search">
+          <div class="issue-desk">
+            <section class="card issue-pane" id="issue-pane-student" aria-labelledby="issue-lbl-student">
+              <div class="issue-lbl" id="issue-lbl-student"><i id="issue-num-student">1</i>Student</div>
+              <div class="issue-sel" id="issue-student-selected" hidden></div>
+              <div id="issue-student-find">
+                <label class="search-field issue-search" for="issue-student-search">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                  <input id="issue-student-search" type="text" placeholder="Search student by name or ID…" autocomplete="off">
+                  <input id="issue-student-search" type="search" placeholder="Name or student ID…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="issue-student-list" aria-autocomplete="list">
                 </label>
-                <div class="pick-list" id="issue-student-list"></div>
-                <div style="display:flex; justify-content:flex-end; margin-top:16px;">
-                  <button class="btn btn-primary" id="issue-next-1" disabled>Continue to Book Selection</button>
-                </div>
+                <div class="issue-list" id="issue-student-list" role="listbox" aria-label="Students"></div>
               </div>
+              <div class="issue-msg" id="issue-student-msg" role="status"></div>
+            </section>
 
-              <div class="wz-stage" id="issue-stage-2">
-                <label class="search-field pick-search" for="issue-book-search">
+            <section class="card issue-pane" id="issue-pane-book" aria-labelledby="issue-lbl-book">
+              <div class="issue-lbl" id="issue-lbl-book"><i id="issue-num-book">2</i>Book</div>
+              <div class="issue-sel" id="issue-book-selected" hidden></div>
+              <div id="issue-book-find">
+                <label class="search-field issue-search" for="issue-book-search">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                  <input id="issue-book-search" type="text" placeholder="Search an available title…" autocomplete="off">
+                  <input id="issue-book-search" type="search" placeholder="Title, author, subject or shelf…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="issue-book-list" aria-autocomplete="list">
                 </label>
-                <div class="pick-list" id="issue-book-list"></div>
-                <div style="display:flex; justify-content:space-between; margin-top:16px;">
-                  <button class="btn btn-secondary" data-back="1">Back</button>
-                  <button class="btn btn-primary" id="issue-next-2" disabled>Continue to Confirm</button>
-                </div>
+                <div class="issue-filters"><button type="button" class="chip active" id="issue-avail" aria-pressed="true">Available only</button></div>
+                <div class="issue-list" id="issue-book-list" role="listbox" aria-label="Books"></div>
               </div>
-
-              <div class="wz-stage" id="issue-stage-3">
-                <div class="confirm-summary">
-                  <div class="catalog-card" id="issue-summary-student"></div>
-                  <div class="catalog-card" id="issue-summary-book"></div>
-                </div>
-                <div class="form-grid" style="margin-top:18px;">
-                  <div class="field">
-                    <label for="issue-date">Issue Date</label>
-                    <input type="date" id="issue-date">
-                  </div>
-                  <div class="field">
-                    <label for="issue-due-date">Due Date</label>
-                    <input type="date" id="issue-due-date">
-                  </div>
-                </div>
-                <div style="display:flex; justify-content:space-between; margin-top:8px;">
-                  <button class="btn btn-secondary" data-back="2">Back</button>
-                  <button class="btn btn-primary" id="issue-confirm-btn">Confirm &amp; Issue Book</button>
-                </div>
-              </div>
-
-              <div class="wz-stage" id="issue-stage-4">
-                <div class="stamp-stage">
-                  <div class="stamp stamp-green" id="issue-stamp">ISSUED</div>
-                  <div class="stamp-caption" id="issue-final-caption">Book issued successfully.</div>
-                  <button class="btn btn-secondary" style="margin-top:20px;" id="issue-restart-btn">Issue Another Book</button>
-                </div>
-              </div>
-            </div>
+              <div class="issue-msg" id="issue-book-msg" role="status"></div>
+            </section>
           </div>
+
+          <div class="card issue-bar" id="issue-bar">
+            <div class="issue-sum" id="issue-summary" aria-live="polite"></div>
+            <div class="field"><label for="issue-date">Issue Date</label><input type="date" id="issue-date"></div>
+            <div class="field"><label for="issue-due-date">Due Date</label><input type="date" id="issue-due-date"></div>
+            <label class="issue-keep"><input type="checkbox" id="issue-keep" checked> Keep student for the next loan</label>
+            <button class="btn btn-primary" id="issue-confirm-btn" type="button" disabled>Confirm &amp; issue</button>
+            <div class="issue-error" id="issue-error" role="alert" hidden></div>
+          </div>
+
+          <div class="card issue-result" id="issue-result" hidden>
+            <div class="stamp stamp-green" id="issue-stamp">ISSUED</div>
+            <div class="stamp-caption" id="issue-final-caption"></div>
+          </div>
+          <div class="issue-log" id="issue-log"></div>
         </section>
 
         <!-- ========================= RETURN BOOK ========================= -->
@@ -591,93 +552,58 @@
           <div class="view-head">
             <div>
               <div class="view-eyebrow">Module 04</div>
-              <h2 class="view-heading">Return a Book</h2>
+              <h1 class="view-heading">Return a Book</h1>
               <p class="view-sub">Find the borrowed title, review the due date, and settle any fine.</p>
             </div>
+            <p class="issue-kbd"><kbd>&uarr;</kbd> <kbd>&darr;</kbd> move &middot; <kbd>Enter</kbd> select &middot; <kbd>Esc</kbd> clear &middot; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> return</p>
           </div>
 
-          <div class="wizard">
-            <div class="wizard-rail" id="return-rail">
-              <div class="wizard-step current" data-step="1">
-                <div class="ws-num">01</div><div class="ws-line"></div>
-                <div><div class="ws-title">Find Borrower</div><div class="ws-desc">Locate the loan</div></div>
-              </div>
-              <div class="wizard-step" data-step="2">
-                <div class="ws-num">02</div><div class="ws-line"></div>
-                <div><div class="ws-title">Book Information</div><div class="ws-desc">Confirm the title</div></div>
-              </div>
-              <div class="wizard-step" data-step="3">
-                <div class="ws-num">03</div><div class="ws-line"></div>
-                <div><div class="ws-title">Check Due Date</div><div class="ws-desc">Days overdue</div></div>
-              </div>
-              <div class="wizard-step" data-step="4">
-                <div class="ws-num">04</div><div class="ws-line"></div>
-                <div><div class="ws-title">Calculate Fine</div><div class="ws-desc">₱ per day rate</div></div>
-              </div>
-              <div class="wizard-step" data-step="5">
-                <div class="ws-num">05</div><div class="ws-line"></div>
-                <div><div class="ws-title">Confirm Return</div><div class="ws-desc">Close the loan</div></div>
-              </div>
-            </div>
-
-            <div class="wizard-panel card" style="padding:24px;">
-              <div class="wz-stage active" id="return-stage-1">
-                <label class="search-field pick-search" for="return-search">
+          <div class="issue-desk">
+            <section class="card issue-pane" id="return-pane-loan" aria-labelledby="return-lbl-loan">
+              <div class="issue-lbl" id="return-lbl-loan"><i id="return-num-loan">1</i>Borrowed title</div>
+              <div class="issue-sel" id="return-loan-selected" hidden></div>
+              <div id="return-loan-find">
+                <label class="search-field issue-search" for="return-search">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                  <input id="return-search" type="text" placeholder="Search borrowed title or borrower…" autocomplete="off">
+                  <input id="return-search" type="search" placeholder="Title or borrower…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="return-loan-list" aria-autocomplete="list">
                 </label>
-                <div class="pick-list" id="return-loan-list"></div>
+                <div class="issue-list" id="return-loan-list" role="listbox" aria-label="Borrowed titles"></div>
               </div>
+              <div class="issue-msg" id="return-loan-msg" role="status"></div>
+            </section>
 
-              <div class="wz-stage" id="return-stage-2">
-                <div class="confirm-summary">
-                  <div class="catalog-card" id="return-summary-book"></div>
-                  <div class="catalog-card" id="return-summary-student"></div>
+            <section class="card issue-pane" id="return-pane-details" aria-labelledby="return-lbl-details">
+              <div class="issue-lbl" id="return-lbl-details"><i id="return-num-details">2</i>Loan details</div>
+              <div class="issue-empty" id="return-details-empty">Select a borrowed title to review the patron, dates and any fine.</div>
+              <div id="return-details-body" hidden>
+                <div class="return-facts" id="return-facts"></div>
+                <div class="form-grid return-dates">
+                  <div class="field"><label for="return-issue-date-display">Issue Date</label><input type="text" id="return-issue-date-display" readonly></div>
+                  <div class="field"><label for="return-due-date-display">Due Date</label><input type="text" id="return-due-date-display" readonly></div>
+                  <div class="field"><label for="return-days-overdue">Days Overdue</label><input type="text" id="return-days-overdue" readonly></div>
                 </div>
-                <div style="display:flex; justify-content:space-between; margin-top:18px;">
-                  <button class="btn btn-secondary" data-back="1">Back</button>
-                  <button class="btn btn-primary" data-next-return="3">Continue to Due Date</button>
-                </div>
-              </div>
-
-              <div class="wz-stage" id="return-stage-3">
-                <div class="form-grid">
-                  <div class="field"><label>Issue Date</label><input type="text" id="return-issue-date-display" readonly></div>
-                  <div class="field"><label>Due Date</label><input type="text" id="return-due-date-display" readonly></div>
-                  <div class="field"><label for="return-date-input">Return Date</label><input type="date" id="return-date-input"></div>
-                  <div class="field"><label>Days Overdue</label><input type="text" id="return-days-overdue" readonly></div>
-                </div>
-                <div style="display:flex; justify-content:space-between; margin-top:8px;">
-                  <button class="btn btn-secondary" data-back="2">Back</button>
-                  <button class="btn btn-primary" data-next-return="4">Continue to Fine</button>
-                </div>
-              </div>
-
-              <div class="wz-stage" id="return-stage-4">
-                <div class="fine-box">
+                <div class="fine-box return-fine">
                   <div class="fb-label">Calculated Fine</div>
                   <div class="fb-amount" id="return-fine-amount">₱0</div>
                   <div class="fb-detail" id="return-fine-detail">No overdue days &middot; ₱10.00 / day</div>
                 </div>
-                <div style="display:flex; justify-content:space-between; margin-top:18px;">
-                  <button class="btn btn-secondary" data-back="3">Back</button>
-                  <button class="btn btn-primary" data-next-return="5">Continue to Confirm</button>
-                </div>
               </div>
-
-              <div class="wz-stage" id="return-stage-5">
-                <div class="stamp-stage" id="return-confirm-panel">
-                  <p style="color:var(--ink-soft); font-size:13.5px; max-width:360px; margin:0 auto 18px;">Review complete. Confirm to close this loan and update the catalog.</p>
-                  <button class="btn btn-primary" id="return-confirm-btn">Confirm Return</button>
-                </div>
-                <div class="stamp-stage" id="return-final-panel" style="display:none;">
-                  <div class="stamp" id="return-stamp">RETURNED</div>
-                  <div class="stamp-caption" id="return-final-caption">Book returned successfully.</div>
-                  <button class="btn btn-secondary" style="margin-top:20px;" id="return-restart-btn">Return Another Book</button>
-                </div>
-              </div>
-            </div>
+            </section>
           </div>
+
+          <div class="card issue-bar" id="return-bar">
+            <div class="issue-sum" id="return-summary" aria-live="polite"></div>
+            <div class="field"><label for="return-date-input">Return Date</label><input type="date" id="return-date-input"></div>
+            <button class="btn btn-primary" id="return-confirm-btn" type="button" disabled>Confirm return</button>
+            <div class="issue-error" id="return-error" role="alert" hidden></div>
+          </div>
+
+          <div class="card issue-result" id="return-result" hidden>
+            <div class="stamp" id="return-stamp">RETURNED</div>
+            <div class="stamp-caption" id="return-final-caption"></div>
+            <button class="btn btn-secondary" type="button" id="return-restart-btn">Return another book</button>
+          </div>
+          <div class="issue-log" id="return-log"></div>
         </section>
 
         <!-- ========================= REPORTS ========================= -->
@@ -685,10 +611,11 @@
           <div class="view-head">
             <div>
               <div class="view-eyebrow">Reports</div>
-              <h2 class="view-heading" id="reports-heading">Borrowing Report</h2>
+              <h1 class="view-heading" id="reports-heading">Borrowing Report</h1>
               <p class="view-sub" id="reports-sub">A running ledger of activity across the collection.</p>
             </div>
           </div>
+          <div class="od-cards" id="overdue-cards" hidden></div>
           <div class="panel">
             <div class="panel-head">
               <div class="panel-title reports-panel-title" id="reports-panel-title">Borrowing over the last 7 days</div>
@@ -697,10 +624,13 @@
             <div class="chart-wrap" id="reports-chart-wrap" aria-live="polite"></div>
           </div>
           <div class="table-card" style="margin-top:18px;">
+            <div class="toolbar od-toolbar" id="overdue-toolbar" hidden></div>
             <table class="data-table" id="reports-table">
               <thead><tr id="reports-thead-row"></tr></thead>
               <tbody id="reports-tbody"></tbody>
             </table>
+            <div class="card-list od-card-list" id="overdue-card-list" hidden></div>
+            <div class="od-foot" id="overdue-foot" hidden></div>
           </div>
         </section>
 
@@ -709,7 +639,7 @@
           <div class="view-head">
             <div>
               <div class="view-eyebrow">Settings</div>
-              <h2 class="view-heading">Settings</h2>
+              <h1 class="view-heading">Settings</h1>
               <p class="view-sub">Manage your profile, appearance and library preferences.</p>
             </div>
             <div class="view-actions">
@@ -771,12 +701,12 @@
                     <div class="field"><label for="profile-username">Username</label><input id="profile-username" type="text" autocomplete="username" disabled><div class="err"></div></div>
                     <div class="field"><label for="profile-email">Email</label><input id="profile-email" type="email" autocomplete="email" disabled><div class="err"></div></div>
                     <div class="field">
-                      <label>Role</label>
+                      <label for="profile-role">Role</label>
                       <input id="profile-role" type="text" readonly>
                       <div class="hint">Assigned by the library administrator.</div>
                     </div>
                     <div class="field">
-                      <label>Account status</label>
+                      <label for="profile-status">Account status</label>
                       <input id="profile-status" type="text" readonly>
                     </div>
                   </div>
@@ -941,7 +871,7 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label for="sys-page-size">Items per page</label>
+                    <label for="sys-page-size">Users per page</label>
                     <select id="sys-page-size">
                       <option value="10">10</option>
                       <option value="25">25</option>

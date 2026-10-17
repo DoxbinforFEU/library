@@ -19,13 +19,18 @@ async function api(path, options = {}) {
     throw e;
   }
   if (!res.ok) {
-    throw new Error(body.error || `Request failed (${res.status})`);
+    const err = new Error(body.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.fields = body.errors || null;
+    throw err;
   }
   return body;
 }
 
 /* One handler for expired sessions: return to the sign-in screen once. */
 let sessionExpiredHandled = false;
+/* Keydown handlers of currently open dialogs, so an expired session can detach them too. */
+const dialogKeyHandlers = new Set();
 function handleSessionExpired(){
   if (sessionExpiredHandled) return;
   sessionExpiredHandled = true;
@@ -33,6 +38,12 @@ function handleSessionExpired(){
   const confirmRoot = document.getElementById("confirm-root");
   if (modalRoot) modalRoot.innerHTML = "";
   if (confirmRoot) confirmRoot.innerHTML = "";
+  dialogKeyHandlers.forEach(h=> document.removeEventListener("keydown", h));
+  dialogKeyHandlers.clear();
+  activeModalCloseFn = null;
+  /* Release the scroll lock and the inert flag on #app, or the UI stays unclickable after re-login. */
+  while (scrollLockCount > 0) unlockScroll();
+  document.getElementById("app")?.removeAttribute("inert");
   document.body.style.overflow = "";
   showLoginScreen("Your session has ended. Sign in again.");
 }
@@ -83,40 +94,44 @@ function mapUser(row) {
     contact: row.contact,
     status: row.status,
     borrowedBookIds: Array.isArray(row.borrowedBookIds) ? row.borrowedBookIds : (row.borrowed_book_ids || []),
-  };
-}
-function mapTx(row) {
-  return {
-    id: row.id,
-    type: row.type,
-    bookId: row.bookId ?? row.book_id ?? null,
-    bookTitle: row.bookTitle ?? row.book_title,
-    userId: row.userId ?? row.user_id ?? null,
-    userName: row.userName ?? row.user_name,
-    issueDate: row.issueDate ?? row.issue_date,
-    dueDate: row.dueDate ?? row.due_date,
-    returnDate: row.returnDate ?? row.return_date ?? null,
-    fine: Number(row.fine || 0),
-    status: row.status,
+    unpaidFines: Number(row.unpaidFines ?? 0),
+    overdueLoans: Number(row.overdueLoans ?? 0),
   };
 }
 
 async function refreshBooks() {
   BOOKS = (await fetchAllPages("books.php", "books")).map(mapBook);
-  syncIdCounters();
 }
 async function refreshUsers() {
   USERS = (await fetchAllPages("users.php", "users")).map(mapUser);
-  syncIdCounters();
 }
-async function refreshTransactions() {
-  const data = await api("transactions.php");
-  TRANSACTIONS = (data.transactions || []).map(mapTx);
-  syncIdCounters();
+/* After a change, re-read only the records it touched instead of every page of the catalog.
+   If a reply is not what we expect, fall back to a full reload so the lists never go stale silently. */
+function upsertById(list, item){
+  const i = list.findIndex(x=>x.id===item.id);
+  if(i>=0) list[i] = item; else list.push(item);
 }
-/* Circulation changes both a book and a patron's borrowed list; nothing else needs refetching. */
-async function refreshCatalog() {
-  await Promise.all([refreshBooks(), refreshUsers()]);
+async function refreshBook(id) {
+  try {
+    const r = await api("books.php?id=" + encodeURIComponent(id));
+    if (r.book) { upsertById(BOOKS, mapBook(r.book)); return; }
+  } catch (e) {
+    if (e.status === 404) { BOOKS = BOOKS.filter(b=>b.id!==id); return; }
+  }
+  await refreshBooks();
+}
+async function refreshUser(id) {
+  try {
+    const r = await api("users.php?id=" + encodeURIComponent(id));
+    if (r.user) { upsertById(USERS, mapUser(r.user)); return; }
+  } catch (e) {
+    if (e.status === 404) { USERS = USERS.filter(u=>u.id!==id); return; }
+  }
+  await refreshUsers();
+}
+/* Circulation changes one book and one patron's borrowed list; nothing else needs refetching. */
+async function refreshAffected(bookId, userId) {
+  await Promise.all([refreshBook(bookId), userId ? refreshUser(userId) : Promise.resolve()]);
 }
 async function bootstrapFromApi() {
   const [books, users, settings, account, notifs] = await Promise.all([
@@ -132,16 +147,6 @@ async function bootstrapFromApi() {
   if (account.account) Object.assign(ACCOUNT, account.account);
   const prefs = notifs.notifPrefs || notifs.prefs;
   if (prefs) Object.assign(NOTIF_PREFS, prefs);
-  syncIdCounters();
-}
-function syncIdCounters() {
-  let maxBook = 0, maxUser = 0, maxTx = 0;
-  BOOKS.forEach(b => { const n = parseInt(String(b.id).replace(/\D/g, ""), 10); if (n > maxBook) maxBook = n; });
-  USERS.forEach(u => { const n = parseInt(String(u.id).split("-").pop(), 10); if (n > maxUser) maxUser = n; });
-  TRANSACTIONS.forEach(t => { const n = parseInt(String(t.id).replace(/\D/g, ""), 10); if (n > maxTx) maxTx = n; });
-  nextBookId = maxBook + 1;
-  nextUserId = maxUser + 1;
-  nextTxId = maxTx + 1;
 }
 const DEFAULT_CONFIG = {
   finePerDay: 10,
@@ -150,7 +155,6 @@ const DEFAULT_CONFIG = {
   maxRenewals: 2,
   gracePeriodDays: 1,
   overdueFinesEnabled: true,
-  defaultBookStatus: "Available",
   dateFormat: "short",
   timeFormat: "12h",
   pageSize: 25,
@@ -224,13 +228,6 @@ async function persistNotifs(){
 
 const CATEGORIES = ["Literature","Science","History","Philosophy","Technology","Psychology","Arts","Business","Mathematics","Computer Science","Education","Social Sciences"]; // must match BOOK_CATEGORIES in includes/validation.php
 
-let nextBookId = 1;
-let nextUserId = 1;
-let nextTxId = 1;
-
-function makeBookId(){ return "BK-" + String(nextBookId++).padStart(4,"0"); }
-function makeUserId(){ const y = 2025; return y + "-" + String(nextUserId++).padStart(3,"0"); }
-function makeTxId(){ return "TX-" + String(nextTxId++).padStart(4,"0"); }
 
 const APP_TZ = "Asia/Manila";
 /* Today's calendar date in Philippine time (YYYY-MM-DD), independent of the browser's timezone. */
@@ -283,24 +280,73 @@ function formatUserName(lastName, firstName, middleInitial){
 
 let BOOKS = [];
 let USERS = [];
-let TRANSACTIONS = [];
 
 /* ==================================================================
    ANIMATIONS.JS — reusable GSAP helpers
    ================================================================== */
+/* If GSAP fails to load (offline, blocked), this stand-in jumps straight to each animation's end
+   state so the sign-in screen and the app still appear instead of a blank page. */
+function createGsapFallback(){
+  const targets = t => {
+    if (typeof t === "string") return Array.from(document.querySelectorAll(t));
+    if (!t) return [];
+    if (t instanceof Element) return [t];
+    if (Array.isArray(t) || t instanceof NodeList) return Array.from(t).flatMap(targets);
+    return [t];
+  };
+  const applyVars = (el, v) => {
+    if (el instanceof Element) {
+      const st = el.style;
+      ["opacity","visibility","display","clipPath","borderColor","strokeDasharray","strokeDashoffset"].forEach(k => { if (k in v) st[k] = v[k]; });
+      ["width","height"].forEach(k => { if (k in v) st[k] = typeof v[k] === "number" ? v[k] + "px" : v[k]; });
+      if ("scaleX" in v) st.transform = "scaleX(" + v.scaleX + ")";
+      else if (["x","y","scale","rotate"].some(k => k in v)) {
+        const x = parseFloat(v.x) || 0, y = parseFloat(v.y) || 0, sc = "scale" in v ? v.scale : 1, r = parseFloat(v.rotate) || 0;
+        st.transform = (x === 0 && y === 0 && sc === 1 && r === 0) ? "" : "translate(" + x + "px," + y + "px) scale(" + sc + ") rotate(" + r + "deg)";
+      }
+      if (v.clearProps) String(v.clearProps).split(",").forEach(p => st.removeProperty(p.trim() === "transform" ? "transform" : p.trim()));
+    } else if (el && typeof el === "object") {
+      Object.keys(v).forEach(k => { if (typeof v[k] === "number") el[k] = v[k]; });
+    }
+  };
+  const tweenTo = (t, v) => {
+    const run = () => {
+      targets(t).forEach(el => applyVars(el, v));
+      if (v.onUpdate) v.onUpdate();
+      if (v.onComplete) v.onComplete();
+    };
+    if (v.delay > 0) setTimeout(run, v.delay * 1000); else run();
+  };
+  const timeline = (opts = {}) => {
+    const tl = {
+      to(t, v){ tweenTo(t, v || {}); return tl; },
+      from(){ return tl; },
+      fromTo(t, f, v){ tweenTo(t, v || {}); return tl; },
+      set(t, v){ tweenTo(t, v || {}); return tl; },
+      call(fn){ fn(); return tl; },
+    };
+    if (opts.onComplete) queueMicrotask(opts.onComplete);
+    return tl;
+  };
+  return {
+    defaults(){}, timeline,
+    to(t, v){ tweenTo(t, v || {}); },
+    from(){},
+    fromTo(t, f, v){ tweenTo(t, v || {}); },
+    set(t, v){ tweenTo(t, v || {}); },
+  };
+}
+if (typeof window.gsap === "undefined") window.gsap = createGsapFallback();
 gsap.defaults({ease:"power2.out"});
 
-function animateCounters(container){
-  const nodes = container.querySelectorAll("[data-count]");
-  nodes.forEach(node=>{
-    const target = parseFloat(node.getAttribute("data-count"));
-    const obj = {val:0};
-    gsap.to(obj,{
-      val:target, duration:1.4, ease:"power3.out", delay:0.1,
-      onUpdate:()=>{ node.textContent = Math.round(obj.val).toLocaleString(); },
-    });
-  });
+/* Reduced motion: GSAP ignores the CSS media query, so speed its global clock up instead. */
+const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+function applyMotionPreference(){
+  if (gsap.globalTimeline && gsap.globalTimeline.timeScale) gsap.globalTimeline.timeScale(reducedMotionQuery.matches ? 100 : 1);
 }
+applyMotionPreference();
+if (reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener("change", applyMotionPreference);
+
 
 /* Stagger a set of elements up-and-in */
 function revealStagger(els, opts={}){
@@ -327,7 +373,7 @@ function transitionView(oldEl, newEl, onSwapped){
     {opacity:0, y:14, clipPath:"inset(6% 0% 0% 0% round 8px)"},
     {opacity:1, y:0, clipPath:"inset(0% 0% 0% 0% round 0px)", duration:0.5, ease:"power2.out"}
   );
-  const staggerTargets = newEl.querySelectorAll(".stat-card, .panel, .card, .table-card, .card-list, .wizard");
+  const staggerTargets = newEl.querySelectorAll(".panel, .card, .table-card, .card-list, .wizard");
   if(staggerTargets.length){
     tl.from(staggerTargets,{opacity:0, y:16, duration:0.45, stagger:0.045, ease:"power2.out"},"-=0.32");
   }
@@ -335,9 +381,9 @@ function transitionView(oldEl, newEl, onSwapped){
 }
 
 /* Modal open/close timelines */
-function openModalEl(backdropEl, modalEl){
+function openModalEl(backdropEl, modalEl, onOpened){
   gsap.set(backdropEl,{display:"flex"});
-  const tl = gsap.timeline();
+  const tl = gsap.timeline({onComplete:onOpened});
   tl.to(backdropEl,{opacity:1, visibility:"visible", duration:0.25, ease:"power1.out"});
   tl.to(modalEl,{opacity:1, scale:1, y:0, duration:0.38, ease:"back.out(1.6)"},"-=0.1");
   const fields = modalEl.querySelectorAll(".field, .catalog-card, .pick-row, .wizard-rail .wizard-step");
@@ -363,13 +409,18 @@ function showToast(message, opts={}){
   const el = document.createElement("div");
   const kind = opts.kind || (opts.warn ? "warn" : "success");
   el.className = "toast toast-" + kind;
-  el.setAttribute("role","status");
+  el.setAttribute("role", kind==="error" ? "alert" : "status");
   const iconSvg = kind==="error" || kind==="warn"
     ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.9 18.3A1.6 1.6 0 0 0 3.3 20.7h17.4a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-3.4 0z"/></svg>'
     : kind==="info"
       ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>'
       : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>';
-  el.innerHTML = `<span class="t-ic">${iconSvg}</span><span>${message}</span>`;
+  const icon = document.createElement("span");
+  icon.className = "t-ic";
+  icon.innerHTML = iconSvg; // static markup only
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.append(icon, text);
   region.appendChild(el);
   const tl = gsap.timeline({onComplete:()=>{
     gsap.to(el,{opacity:0, x:30, duration:0.3, delay:opts.hold ?? 2.6, ease:"power1.in",
@@ -430,10 +481,6 @@ function drawPath(pathEl, opts={}){
   gsap.to(pathEl,{strokeDashoffset:0, duration:opts.duration ?? 1.2, ease:"power2.inOut", delay:opts.delay ?? 0});
 }
 
-/* Animate SVG circle stroke (donut segments) */
-function drawCircle(circleEl, targetOffset, opts={}){
-  gsap.to(circleEl,{strokeDashoffset:targetOffset, duration:opts.duration ?? 1, ease:"power2.out", delay:opts.delay ?? 0});
-}
 
 
 /* ==================================================================
@@ -442,15 +489,17 @@ function drawCircle(circleEl, targetOffset, opts={}){
 const state = {
   currentView:"dashboard",
   books:{
-    search:"", category:"all", sort:"featured", editingId:null,
+    search:"", category:"all", sort:"featured",
     filters:{ subjects:[], authors:[], availability:[], years:[], formats:[] },
   },
-  users:{ search:"", filter:"all", sort:"name-asc", editingId:null },
-  issue:{ step:1, studentId:null, bookId:null },
-  ret:{ step:1, txId:null, returnDate:null },
+  users:{ search:"", filter:"all", sort:"name-asc" },
+  issue:{ studentId:null, bookId:null, sq:"", bq:"", availOnly:true, keep:true },
+  ret:{ bookId:null, q:"", returnDate:null, fine:0, overdueDays:0 },
   selectedBookId:null,
   booksLimit:48, booksSig:"", usersLimit:0, usersSig:"",
   reportType:"borrowing",
+  overdue:{ q:"", band:"all", sort:"days", page:1 },
+  borrowing:{ q:"", sort:"newest", page:1 },
 };
 
 /* ---- Browser-local UI state only: recently viewed titles and recent searches. ---- */
@@ -473,16 +522,20 @@ function pushRecentSearch(q){
 }
 
 const VIEW_META = {
-  dashboard:{title:"Dashboard", crumb:"Overview"},
-  books:{title:"Books", crumb:"Module 01 · Catalog"},
-  users:{title:"Users", crumb:"Module 02 · Patrons"},
-  issue:{title:"Issue Book", crumb:"Module 03 · Transactions"},
-  return:{title:"Return Book", crumb:"Module 04 · Transactions"},
-  reports:{title:"Reports", crumb:"Ledger"},
-  settings:{title:"Settings", crumb:"Preferences"},
-  "book-details":{title:"Book", crumb:"Module 01 · Catalog"},
+  dashboard:{title:"Discover"},
+  books:{title:"Collection"},
+  users:{title:"Users"},
+  issue:{title:"Issue Book"},
+  return:{title:"Return Book"},
+  reports:{title:"Reports"},
+  settings:{title:"Settings"},
+  "book-details":{title:"Book"},
 };
 
+function debounce(fn, ms){
+  let t;
+  return (...a)=>{ clearTimeout(t); t = setTimeout(()=>fn(...a), ms); };
+}
 function $(sel,root=document){ return root.querySelector(sel); }
 function $all(sel,root=document){ return Array.from(root.querySelectorAll(sel)); }
 function esc(str){
@@ -510,6 +563,34 @@ function badgeClassFor(status){
 }
 function findBook(id){ return BOOKS.find(b=>b.id===id); }
 function findUser(id){ return USERS.find(u=>u.id===id); }
+/* Why a patron cannot borrow right now ("" when they can). The server enforces the same rule. */
+function holdReason(u){
+  if(!u) return "";
+  if(u.overdueLoans > 0) return `${u.overdueLoans} overdue book${u.overdueLoans===1?"":"s"}`;
+  if(u.unpaidFines > 0) return `Unpaid fines ${peso(u.unpaidFines)}`;
+  return "";
+}
+
+/* ---------------- Focus helpers ---------------- */
+const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function focusableIn(root){
+  return Array.from(root.querySelectorAll(FOCUSABLE)).filter(el=> !el.closest("[hidden]") && el.getClientRects().length > 0);
+}
+/* Keep Tab / Shift+Tab inside `root` (modals, the open mobile menu). */
+function trapTab(e, root){
+  if(e.key !== "Tab") return;
+  const items = focusableIn(root);
+  if(!items.length){ e.preventDefault(); return; }
+  const first = items[0], last = items[items.length-1], active = document.activeElement;
+  if(e.shiftKey && (active === first || !root.contains(active))){ e.preventDefault(); last.focus(); }
+  else if(!e.shiftKey && (active === last || !root.contains(active))){ e.preventDefault(); first.focus(); }
+}
+function focusViewHeading(viewEl){
+  const h = viewEl.querySelector("h1");
+  if(!h) return;
+  h.setAttribute("tabindex","-1");
+  h.focus({preventScroll:true});
+}
 
 /* ---------------- Navigation ---------------- */
 function goToView(viewName, opts={}){
@@ -518,6 +599,7 @@ function goToView(viewName, opts={}){
     if(opts.booksTab==="add") openBookModal(null);
     if(opts.usersTab==="add") openUserModal(null);
     if(opts.report) renderReports(opts.report);
+    if(typeof opts.after === "function") opts.after();
     return;
   }
   const oldEl = document.getElementById("view-" + state.currentView);
@@ -549,11 +631,14 @@ function goToView(viewName, opts={}){
       showSettingsPane(opts.settingsPane || "profile");
       hydrateSettings();
     }
+    if(meta) document.title = meta.title + " · FEU Roosevelt Library";
+    if(!opts.silent) focusViewHeading(newEl);
+    if(opts.booksTab==="add") openBookModal(null);
+    if(opts.usersTab==="add") openUserModal(null);
+    if(typeof opts.after === "function") opts.after();
   });
   closeMobileNav();
   closeAllPopovers();
-  if(opts.booksTab==="add") setTimeout(()=>openBookModal(null), 420);
-  if(opts.usersTab==="add") setTimeout(()=>openUserModal(null), 420);
 }
 
 $all("[data-view]").forEach(btn=>{
@@ -574,8 +659,7 @@ $all("[data-anchor]").forEach(btn=>{
     const id = btn.dataset.anchor;
     const jump = ()=> document.getElementById(id)?.scrollIntoView({behavior:"smooth", block:"start"});
     if(state.currentView !== "dashboard"){
-      goToView("dashboard");
-      setTimeout(jump, 460);
+      goToView("dashboard", {after:()=> requestAnimationFrame(jump)});
     } else {
       jump();
     }
@@ -591,8 +675,7 @@ $("#hero-search-form")?.addEventListener("submit", e=>{
   state.books.category = "all";
   state.books.filters = emptyFilters();
   if(q.trim()) pushRecentSearch(q);
-  goToView("books", {force:true});
-  setTimeout(()=>{ const f = $("#books-search"); if(f) f.value = q; toggleSearchClear(); }, 420);
+  goToView("books", {force:true, after:()=>{ const f = $("#books-search"); if(f) f.value = q; toggleSearchClear(); }});
 });
 
 /* ---------------- Header menus + mobile nav ---------------- */
@@ -604,18 +687,23 @@ function openMobileNav(){
   gsap.fromTo(menubarEl,{x:-24},{x:0,duration:0.28,ease:"power3.out"});
   gsap.to(overlayEl,{opacity:1,duration:0.22});
   $("#hamburger-btn").setAttribute("aria-expanded","true");
+  $(".menubar-close", menubarEl)?.focus();
 }
-function closeMobileNav(){
+function closeMobileNav(opts={}){
   if(!menubarEl.classList.contains("open")) return;
   gsap.to(overlayEl,{opacity:0,duration:0.18, onComplete:()=>overlayEl.classList.remove("show")});
   menubarEl.classList.remove("open");
   $("#hamburger-btn").setAttribute("aria-expanded","false");
+  if(opts.restore) $("#hamburger-btn").focus();
 }
 $("#hamburger-btn").addEventListener("click", ()=>{
-  menubarEl.classList.contains("open") ? closeMobileNav() : openMobileNav();
+  menubarEl.classList.contains("open") ? closeMobileNav({restore:true}) : openMobileNav();
 });
-overlayEl.addEventListener("click", ()=>{ closeMobileNav(); closeAllPopovers(); });
-$("#menubar-close-btn")?.addEventListener("click", closeMobileNav);
+menubarEl.addEventListener("keydown", e=>{
+  if(menubarEl.classList.contains("open")) trapTab(e, menubarEl);
+});
+overlayEl.addEventListener("click", ()=>{ closeMobileNav({restore:true}); closeAllPopovers(); });
+$("#menubar-close-btn")?.addEventListener("click", ()=> closeMobileNav({restore:true}));
 
 /* Mobile search toggle: reveals the header search field inline since the
    full-width field is hidden on small screens (see .search-global rules). */
@@ -624,7 +712,7 @@ $("#search-toggle-btn")?.addEventListener("click", ()=>{
   if(!field) return;
   const open = field.classList.toggle("mobile-open");
   $("#search-toggle-btn").setAttribute("aria-expanded", String(open));
-  if(open) setTimeout(()=> $("#global-search")?.focus(), 60);
+  if(open) $("#global-search")?.focus();
 });
 
 $all(".menu-drop > .menu-link").forEach(btn=>{
@@ -632,8 +720,14 @@ $all(".menu-drop > .menu-link").forEach(btn=>{
     e.stopPropagation();
     const drop = btn.parentElement;
     const willOpen = !drop.classList.contains("open");
-    $all(".menu-drop").forEach(d=> d.classList.remove("open"));
-    if(willOpen) drop.classList.add("open");
+    closeAllPopovers();
+    if(willOpen){ drop.classList.add("open"); btn.setAttribute("aria-expanded","true"); }
+  });
+  btn.parentElement.addEventListener("focusout", e=>{
+    const drop = btn.parentElement;
+    if(e.relatedTarget && drop.contains(e.relatedTarget)) return;
+    drop.classList.remove("open");
+    btn.setAttribute("aria-expanded","false");
   });
 });
 
@@ -641,7 +735,10 @@ function closeAllPopovers(){
   $all(".header-pop .dropdown-panel").forEach(p=> p.hidden = true);
   $("#notif-btn")?.setAttribute("aria-expanded","false");
   $("#avatar-btn")?.setAttribute("aria-expanded","false");
-  $all(".menu-drop").forEach(d=> d.classList.remove("open"));
+  $all(".menu-drop").forEach(d=>{
+    d.classList.remove("open");
+    d.querySelector(".menu-link")?.setAttribute("aria-expanded","false");
+  });
 }
 function togglePopover(btn, panel){
   const open = panel.hidden;
@@ -658,6 +755,20 @@ $("#avatar-btn").addEventListener("click", e=>{
   togglePopover($("#avatar-btn"), $("#profile-menu"));
 });
 document.addEventListener("click", closeAllPopovers);
+document.addEventListener("keydown", e=>{
+  if(e.key !== "Escape" || scrollLockCount > 0) return;
+  if(menubarEl.classList.contains("open")){ closeMobileNav({restore:true}); return; }
+  const pop = [["#notif-menu","#notif-btn"],["#profile-menu","#avatar-btn"]].find(([p])=> !$(p).hidden);
+  if(pop){ closeAllPopovers(); $(pop[1]).focus(); return; }
+  const drop = $(".menu-drop.open");
+  if(drop){ closeAllPopovers(); drop.querySelector(".menu-link").focus(); return; }
+  const search = $(".search-global.mobile-open");
+  if(search){
+    search.classList.remove("mobile-open");
+    $("#search-toggle-btn").setAttribute("aria-expanded","false");
+    $("#search-toggle-btn").focus();
+  }
+});
 $("#profile-menu").addEventListener("click", e=> e.stopPropagation());
 $("#notif-menu").addEventListener("click", e=> e.stopPropagation());
 
@@ -672,8 +783,7 @@ async function signOutCurrentSession(){
 
 $all("[data-go]").forEach(btn=>{
   btn.addEventListener("click", ()=>{
-    const pane = btn.dataset.go === "settings" ? "profile" : "profile";
-    goToView("settings", {force:true, settingsPane: pane});
+    goToView("settings", {force:true, settingsPane:"profile"});
     closeAllPopovers();
   });
 });
@@ -697,7 +807,7 @@ function applyTheme(pref, persist=true){
   document.documentElement.setAttribute("data-theme", resolved);
   document.documentElement.setAttribute("data-theme-pref", pref);
   if(persist) localStorage.setItem(STORAGE.theme, pref);
-  $all(".theme-card").forEach(c=> c.classList.toggle("active", c.dataset.themePref===pref));
+  $all(".theme-card").forEach(c=>{ c.classList.toggle("active", c.dataset.themePref===pref); c.setAttribute("aria-pressed", String(c.dataset.themePref===pref)); });
   const toggle = $("#menu-theme-toggle");
   if(toggle) toggle.textContent = resolved==="dark" ? "Light Mode" : "Dark Mode";
   if(state.currentView==="dashboard") renderDashboard({cached:true});
@@ -711,7 +821,12 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=
    BOOK CARDS (shared by collection, related and recently viewed)
    ================================================================== */
 const BOOK_CARD_COLORS = ["var(--green)","var(--green-deep)","var(--oxblood)","var(--brass)","var(--navy-badge)"];
-function colorForBook(book, i){ return BOOK_CARD_COLORS[i % BOOK_CARD_COLORS.length]; }
+function colorForBook(book){
+  const key = String(book.id || book.title || "");
+  let h = 0;
+  for(let k=0;k<key.length;k++) h = (h*31 + key.charCodeAt(k)) >>> 0;
+  return BOOK_CARD_COLORS[h % BOOK_CARD_COLORS.length];
+}
 function bookInitial(book){
   const t = String(book.title || "").replace(/^(the|a|an)\s+/i,"").trim();
   return (t[0] || "?").toUpperCase();
@@ -729,7 +844,7 @@ function bookCardHTML(book, i, opts={}){
     <div class="book-card${opts.featured ? " book-card-featured" : ""}" data-book-id="${esc(book.id)}" tabindex="0" role="button" aria-label="View ${esc(book.title)} by ${esc(book.author)}">
       <div class="book-card-face" style="--book-color:${colorForBook(book,i)}">
         <div class="book-card-initial">${esc(bookInitial(book))}</div>
-        ${book.cover ? `<img class="book-card-cover" src="${esc(book.cover)}" alt="" loading="lazy" onerror="this.remove()">` : ""}
+        ${book.cover ? `<img class="book-card-cover" src="${esc(book.cover)}" alt="" loading="lazy" data-hide-on-error>` : ""}
         <span class="book-card-availability-pill ${availabilityBadgeClass(bucket)}">${esc(bucket)}</span>
         <span class="book-card-hover-cta">View book
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
@@ -745,6 +860,14 @@ function bookCardHTML(book, i, opts={}){
       </div>
     </div>`;
 }
+/* A cover image that fails to load is removed so the coloured card face shows instead.
+   (Replaces an inline error-handler attribute, which a strict Content-Security-Policy forbids. Image errors do not
+   bubble, so listen in the capture phase.) */
+document.addEventListener("error", e=>{
+  const t = e.target;
+  if(t && t.tagName === "IMG" && t.hasAttribute("data-hide-on-error")) t.remove();
+}, true);
+
 function wireBookCards(root){
   $all(".book-card", root).forEach(card=>{
     const go = ()=> openBookDetails(card.dataset.bookId);
@@ -805,40 +928,75 @@ function renderDashboard(opts={}){
   if(!opts.cached) refreshNotifications();
 }
 
+/* Round an axis step up to a tidy whole number (1, 2, 3, 4, 5, 6, 8, 10, 20, 30...). */
+function niceAxisStep(raw){
+  raw = Math.max(1, raw);
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / pow;
+  return (n<=1 ? 1 : n<=2 ? 2 : n<=3 ? 3 : n<=4 ? 4 : n<=5 ? 5 : n<=6 ? 6 : n<=8 ? 8 : 10) * pow;
+}
+
+/* Borrowing report chart: summary tiles + grouped bars (issued vs returned) with a legend, y-axis,
+   a value above every bar, and a tooltip on hover, tap or keyboard focus. Plain HTML/CSS (no SVG scaling),
+   so the chart keeps a fixed height and readable type at any panel width. */
 function renderActivityChart(targetId, activity){
   const wrap = document.getElementById(targetId);
-  const W=560,H=200,pad=28;
-  const labels = activity.map(a=>a.label), issued = activity.map(a=>a.issued), returned = activity.map(a=>a.returned);
-  const total = issued.concat(returned).reduce((x,y)=>x+y,0);
-  const maxV = Math.max(1, ...issued, ...returned) * 1.15;
-  const stepX = (W - pad*2) / Math.max(1, labels.length-1);
-  const toXY = (arr,i) => [pad + stepX*i, H - pad - (arr[i]/maxV)*(H-pad*2)];
-  const pathFrom = arr => arr.map((_,i)=>{
-    const [x,y]=toXY(arr,i); return (i===0?"M":"L") + x.toFixed(1) + " " + y.toFixed(1);
-  }).join(" ");
-  let gridLines = "";
-  for(let i=0;i<=3;i++){
-    const y = pad + (H-pad*2)*(i/3);
-    gridLines += `<line x1="${pad}" y1="${y.toFixed(1)}" x2="${W-pad}" y2="${y.toFixed(1)}" stroke="${cssVar("--paper-2")}" stroke-width="1"/>`;
-  }
-  const xLabels = labels.map((l,i)=>{
-    const [x] = toXY(issued,i);
-    return `<text x="${x}" y="${H-6}" font-family="IBM Plex Mono" font-size="10" fill="${cssVar("--ink-soft")}" text-anchor="middle">${esc(l)}</text>`;
+  const rows = (activity || []).map(a=>({
+    label: String(a.label || ""), date: a.date,
+    issued: Number(a.issued) || 0, returned: Number(a.returned) || 0,
+  }));
+  const sumIssued = rows.reduce((n,r)=>n+r.issued, 0);
+  const sumReturned = rows.reduce((n,r)=>n+r.returned, 0);
+  const peakIssued = Math.max(0, ...rows.map(r=>r.issued));
+  let peak = -1; // busiest day by books issued (the most recent day wins a tie)
+  rows.forEach((r,i)=>{ if(r.issued>0 && r.issued>=peakIssued) peak = i; });
+  const maxV = Math.max(1, ...rows.map(r=>Math.max(r.issued, r.returned)));
+  const step = niceAxisStep(maxV * 1.1 / 3); // three intervals with ~10% headroom for the value labels
+  const top = step * 3;
+  const pct = v => (v / top * 100).toFixed(2);
+
+  const grid = [3,2,1].map(k=>`<div class="bar-grid" style="top:${pct(top - k*step)}%"><span>${k*step}</span></div>`).join("")
+    + `<div class="bar-grid base" style="top:100%"><span>0</span></div>`;
+  const cols = rows.map((r,i)=>{
+    const desc = `${r.label}, ${fmtDate(r.date)}: ${r.issued} issued, ${r.returned} returned`;
+    return `<div class="bar-col" tabindex="0" role="img" aria-label="${esc(desc)}" data-i="${i}">
+      <div class="bar bar-issued" style="height:${pct(r.issued)}%"><span class="bar-val">${r.issued}</span></div>
+      <div class="bar bar-returned" style="height:${pct(r.returned)}%"><span class="bar-val">${r.returned}</span></div>
+      <span class="bar-label">${esc(r.label)}</span>
+    </div>`;
   }).join("");
-  const green = cssVar("--green") || "#237A43";
-  const brass = cssVar("--brass") || "#EBB134";
-  const dots = (arr,color)=> arr.map((v,i)=>{const[x,y]=toXY(arr,i); return `<circle cx="${x}" cy="${y}" r="3" fill="${color}"><title>${esc(labels[i])}: ${v}</title></circle>`;}).join("");
-  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Books issued and returned per day over the last 7 days">
-    ${gridLines}
-    <path class="js-path-issued" d="${pathFrom(issued)}" fill="none" stroke="${green}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path class="js-path-returned" d="${pathFrom(returned)}" fill="none" stroke="${brass}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    ${dots(issued,green)}${dots(returned,brass)}
-    ${xLabels}
-  </svg>` + (total===0 ? `<div class="chart-empty">No borrowing activity in the last 7 days.</div>` : "");
-  requestAnimationFrame(()=>{
-    drawPath(wrap.querySelector(".js-path-issued"),{duration:1.1});
-    drawPath(wrap.querySelector(".js-path-returned"),{duration:1.1, delay:0.15});
+
+  wrap.innerHTML = `<div class="bar-chart">
+    <div class="bar-kpis">
+      <div class="bar-kpi"><span class="bar-kpi-k">Issued &middot; 7 days</span><b>${sumIssued}</b></div>
+      <div class="bar-kpi"><span class="bar-kpi-k">Returned &middot; 7 days</span><b>${sumReturned}</b></div>
+      <div class="bar-kpi"><span class="bar-kpi-k">Busiest day</span><b>${peak>=0 ? esc(rows[peak].label) : "&mdash;"}</b><span class="bar-kpi-f">${peak>=0 ? rows[peak].issued + " issued" : "No activity"}</span></div>
+    </div>
+    <div class="bar-legend"><span><i class="bar-issued"></i>Issued</span><span><i class="bar-returned"></i>Returned</span></div>
+    <div class="bar-plot" role="group" aria-label="Books issued and returned per day over the last 7 days">
+      ${grid}<div class="bar-cols">${cols}</div><div class="bar-tip" hidden></div>
+    </div>
+  </div>` + (sumIssued + sumReturned === 0 ? `<div class="chart-empty">No borrowing activity in the last 7 days.</div>` : "");
+
+  const plot = wrap.querySelector(".bar-plot"), tip = wrap.querySelector(".bar-tip");
+  const colEls = $all(".bar-col", plot);
+  const show = col=>{
+    const r = rows[+col.dataset.i];
+    colEls.forEach(c=> c.classList.toggle("is-active", c===col));
+    tip.innerHTML = `<span class="bar-tip-h">${esc(r.label)}, ${esc(fmtDate(r.date))}</span><br>Issued ${r.issued} &middot; Returned ${r.returned}`;
+    tip.hidden = false;
+    const w = tip.offsetWidth, center = col.offsetLeft + col.offsetWidth/2;
+    tip.style.left = Math.min(Math.max(center, w/2 - 30), plot.clientWidth + 6 - w/2) + "px";
+    tip.style.top = Math.max(plot.clientHeight * (1 - Math.max(r.issued, r.returned)/top) - 20, 0) + "px";
+  };
+  const hide = ()=>{ tip.hidden = true; colEls.forEach(c=> c.classList.remove("is-active")); };
+  colEls.forEach(col=>{
+    col.addEventListener("mouseenter", ()=> show(col));
+    col.addEventListener("focus", ()=> show(col));
+    col.addEventListener("click", ()=> show(col));
   });
+  plot.addEventListener("mouseleave", hide);
+  plot.addEventListener("focusout", e=>{ if(!plot.contains(e.relatedTarget)) hide(); });
 }
 
 /* ---------- Notifications: real counts from api/notifs.php ---------- */
@@ -855,7 +1013,7 @@ async function refreshNotifications(){
     closeAllPopovers();
     const k = btn.dataset.kind;
     if(k==="overdue") goToView("reports", {report:"overdue", force:true});
-    else if(k==="returns") goToView("reports", {report:"borrowing", force:true});
+    else if(k==="returns" || k==="due") goToView("reports", {report:"borrowing", force:true});
     else goToView("dashboard", {force:true});
   }));
 }
@@ -926,6 +1084,7 @@ function renderBooks(){
 
   $all("#books-category-list [data-category]").forEach(btn=>{
     btn.classList.toggle("active", btn.dataset.category === state.books.category);
+    btn.setAttribute("aria-pressed", String(btn.dataset.category === state.books.category));
   });
   syncFiltersPanel();
 
@@ -1013,7 +1172,8 @@ function openSuggestions(){ renderSearchSuggestions(); booksSuggestions.hidden =
 function closeSuggestions(){ if(booksSuggestions) booksSuggestions.hidden = true; collectionSearchWrap?.classList.remove("is-focused"); }
 
 booksSearchInput?.addEventListener("focus", openSuggestions);
-booksSearchInput?.addEventListener("input", e=>{ state.books.search = e.target.value; toggleSearchClear(); renderBooks(); });
+const renderBooksSoon = debounce(()=>renderBooks(), 150);
+booksSearchInput?.addEventListener("input", e=>{ state.books.search = e.target.value; toggleSearchClear(); renderBooksSoon(); });
 booksSearchInput?.addEventListener("keydown", e=>{
   if(e.key==="Enter"){ e.preventDefault(); commitSearch(booksSearchInput.value); booksSearchInput.blur(); }
   if(e.key==="Escape"){ closeSuggestions(); booksSearchInput.blur(); }
@@ -1215,6 +1375,7 @@ function wireRowActions(root, kind){
       kind==="book" ? openBookModal(id,{readonly:true}) : openUserModal(id,{readonly:true});
     });
     row.addEventListener("keypress", e=>{
+      if(e.target !== row) return;
       if(e.key==="Enter"){ kind==="book" ? openBookModal(id,{readonly:true}) : openUserModal(id,{readonly:true}); }
     });
   });
@@ -1227,21 +1388,21 @@ function bookFormTemplate(book, readonly){
   const uncategorized = book && !CATEGORIES.includes(book.category) ? `<option value="" selected>Uncategorized</option>` : "";
   return `
     <div class="form-grid">
-      <div class="field full"><label for="f-title">Title</label><input id="f-title" type="text" value="${esc(b.title)}" ${dis} required></div>
-      <div class="field"><label for="f-author">Author</label><input id="f-author" type="text" value="${esc(b.author)}" ${dis} required></div>
+      <div class="field full"><label for="f-title">Title</label><input id="f-title" type="text" value="${esc(b.title)}" ${dis} required><div class="err"></div></div>
+      <div class="field"><label for="f-author">Author</label><input id="f-author" type="text" value="${esc(b.author)}" ${dis} required><div class="err"></div></div>
       <div class="field"><label for="f-category">Category</label>
         <select id="f-category" ${dis}>${uncategorized}${CATEGORIES.map(c=>`<option ${c===b.category?"selected":""}>${c}</option>`).join("")}</select>
       </div>
-      <div class="field"><label for="f-isbn">ISBN</label><input id="f-isbn" type="text" value="${esc(b.isbn)}" ${dis} required></div>
-      <div class="field"><label for="f-year">Publication Year</label><input id="f-year" type="number" value="${b.year ?? ""}" ${dis}></div>
-      <div class="field"><label for="f-location">Shelf / Location</label><input id="f-location" type="text" value="${esc(b.location)}" placeholder="e.g. A-12" ${dis} required></div>
+      <div class="field"><label for="f-isbn">ISBN</label><input id="f-isbn" type="text" value="${esc(b.isbn)}" ${dis} required><div class="err"></div></div>
+      <div class="field"><label for="f-year">Publication Year</label><input id="f-year" type="number" value="${b.year ?? ""}" ${dis}><div class="err"></div></div>
+      <div class="field"><label for="f-location">Shelf / Location</label><input id="f-location" type="text" value="${esc(b.location)}" placeholder="e.g. A-12" ${dis} required><div class="err"></div></div>
       <div class="field"><label for="f-format">Format</label>
         <select id="f-format" ${dis}><option value="">Not recorded</option>${FORMATS.map(f=>`<option ${f===b.format?"selected":""}>${f}</option>`).join("")}</select>
       </div>
       <div class="field full"><label for="f-description">Description</label><textarea id="f-description" rows="3" ${dis}>${esc(b.description)}</textarea><div class="hint">Optional. Leave blank if there is none.</div></div>
       <div class="field full"><label for="f-cover">Cover image URL</label><input id="f-cover" type="url" value="${esc(b.cover)}" placeholder="https://…" ${dis}><div class="hint">Optional. Must start with http:// or https://.</div><div class="err">Enter a full http(s) image address.</div></div>
-      ${book ? `<div class="field"><label>Status</label><input type="text" value="${esc(book.status)}" disabled></div>
-      <div class="field"><label>Book ID</label><input type="text" value="${esc(book.id)}" disabled></div>` : ""}
+      ${book ? `<div class="field"><label for="f-status-ro">Status</label><input id="f-status-ro" type="text" value="${esc(book.status)}" disabled></div>
+      <div class="field"><label for="f-bookid">Book ID</label><input id="f-bookid" type="text" value="${esc(book.id)}" disabled></div>` : ""}
     </div>`;
 }
 
@@ -1280,33 +1441,35 @@ async function saveBookForm(modalEl, existing){
     cover: $("#f-cover",modalEl).value.trim(),
   };
   if (!Number.isFinite(vals.year)) vals.year = null;
-  let missing=false;
-  [["f-title",vals.title],["f-author",vals.author],["f-isbn",vals.isbn],["f-location",vals.location]].forEach(([id,v])=>{
-    const field = document.getElementById(id).closest(".field");
-    if(!v){ field.classList.add("invalid"); missing=true; } else { field.classList.remove("invalid"); }
-  });
-  const coverField = $("#f-cover",modalEl).closest(".field");
-  if(vals.cover && !/^https?:\/\//i.test(vals.cover)){ coverField.classList.add("invalid"); missing=true; } else { coverField.classList.remove("invalid"); }
-  if(missing || !vals.title){ shakeModal(modalEl); return; }
+  let firstBad = null;
+  const flag = (id, msg)=>{ const el = $("#"+id, modalEl); setFieldError(el, msg); firstBad = firstBad || el; };
+  ["f-title","f-author","f-isbn","f-location","f-cover","f-year"].forEach(id=> clearFieldError($("#"+id, modalEl)));
+  if(!vals.title) flag("f-title","Enter the title.");
+  if(!vals.author) flag("f-author","Enter the author.");
+  if(!vals.isbn) flag("f-isbn","Enter the ISBN.");
+  if(!vals.location) flag("f-location","Enter the shelf location.");
+  if(vals.cover && !/^https?:\/\//i.test(vals.cover)) flag("f-cover","Enter a full http(s) image address.");
+  if(firstBad){ shakeModal(modalEl); firstBad.focus(); return; }
 
   try {
+    let res;
     if(existing){
-      await api("books.php?id=" + encodeURIComponent(existing.id), {
+      res = await api("books.php?id=" + encodeURIComponent(existing.id), {
         method:"PUT",
         body: JSON.stringify(vals),
       });
-      showToast(`“${esc(vals.title)}” updated successfully.`);
+      showToast(`“${vals.title}” updated successfully.`);
     } else {
-      await api("books.php", {
+      res = await api("books.php", {
         method:"POST",
         body: JSON.stringify({ ...vals, status:"Available" }),
       });
       showToast("Book added successfully.");
     }
-    await refreshBooks();
+    if (res && res.book) upsertById(BOOKS, mapBook(res.book)); else await refreshBooks();
     closeModal(()=>{ renderBooks(); renderDashboard(); });
   } catch (err) {
-    showToast(err.message, {kind:"error"});
+    if(!showServerFieldErrors(modalEl, err, BOOK_FIELD_IDS)) showToast(err.message, {kind:"error"});
   }
 }
 
@@ -1315,7 +1478,7 @@ function confirmDeleteBook(id){
   const run = async ()=>{
     try {
       await api("books.php?id=" + encodeURIComponent(id), { method:"DELETE" });
-      await refreshBooks();
+      BOOKS = BOOKS.filter(b=>b.id!==id);
       if(state.currentView==="book-details" && state.selectedBookId===id){
         goToView("books", {force:true});
       } else {
@@ -1330,7 +1493,7 @@ function confirmDeleteBook(id){
   if(!CONFIG.confirmDeletes){ run(); return; }
   renderConfirm({
     title:"Remove this book?",
-    body:`Remove “${esc(book.title)}” from the catalog? This cannot be undone.`,
+    body:`Remove “${book.title}” from the catalog? This cannot be undone.`,
     confirmLabel:"Remove",
     onConfirm:run,
   });
@@ -1376,16 +1539,16 @@ function renderUsers(){
   empty.style.display="none";
 
   tbody.innerHTML = list.map(u=>`
-    <tr data-id="${u.id}" tabindex="0">
-      <td class="cell-mono">${u.id}</td>
+    <tr data-id="${esc(u.id)}" tabindex="0">
+      <td class="cell-mono">${esc(u.id)}</td>
       <td>
         <div class="cell-primary">${esc(u.name)}</div>
         <div class="cell-sub">${esc(u.contact)}</div>
       </td>
       <td>${esc(u.program)}</td>
-      <td>${u.yearLevel ?? "—"}</td>
+      <td>${esc(u.yearLevel ?? "—")}</td>
       <td>${u.borrowedBookIds.length}</td>
-      <td><span class="badge ${badgeClassFor(u.status)}">${u.status}</span></td>
+      <td><span class="badge ${badgeClassFor(u.status)}">${esc(u.status)}</span></td>
       <td>
         <div class="row-actions">
           <button class="icon-btn" data-act="view" title="View details" aria-label="View ${esc(u.name)}">
@@ -1402,12 +1565,12 @@ function renderUsers(){
     </tr>`).join("");
 
   cardList.innerHTML = list.map(u=>`
-    <div class="record-card" data-id="${u.id}" tabindex="0">
+    <div class="record-card" data-id="${esc(u.id)}" tabindex="0">
       <div class="rc-top">
-        <div><div class="rc-title">${esc(u.name)}</div><div class="rc-sub">${esc(u.program || "—")} &middot; Yr ${u.yearLevel ?? "—"}</div></div>
-        <span class="badge ${badgeClassFor(u.status)}">${u.status}</span>
+        <div><div class="rc-title">${esc(u.name)}</div><div class="rc-sub">${esc(u.program || "—")} &middot; Yr ${esc(u.yearLevel ?? "—")}</div></div>
+        <span class="badge ${badgeClassFor(u.status)}">${esc(u.status)}</span>
       </div>
-      <div class="rc-meta"><span><b>${u.id}</b></span><span>${u.borrowedBookIds.length} book(s) out</span></div>
+      <div class="rc-meta"><span><b>${esc(u.id)}</b></span><span>${u.borrowedBookIds.length} book(s) out</span></div>
       <div class="rc-actions">
         <button class="btn btn-secondary btn-sm" data-act="view">View</button>
         <button class="btn btn-secondary btn-sm" data-act="edit">Edit</button>
@@ -1424,12 +1587,14 @@ function renderUsers(){
 
 $("#users-more").addEventListener("click", ()=>{ state.usersLimit += CONFIG.pageSize || 25; renderUsers(); });
 $("#books-more").addEventListener("click", ()=>{ state.booksLimit += 48; renderBooks(); });
-$("#users-search").addEventListener("input", e=>{ state.users.search = e.target.value; renderUsers(); });
+const renderUsersSoon = debounce(()=>renderUsers(), 150);
+$("#users-search").addEventListener("input", e=>{ state.users.search = e.target.value; renderUsersSoon(); });
 $("#users-sort").addEventListener("change", e=>{ state.users.sort = e.target.value; renderUsers(); });
 $all("#users-filter-chips .chip").forEach(chip=>{
   chip.addEventListener("click", ()=>{
-    $all("#users-filter-chips .chip").forEach(c=>c.classList.remove("active"));
+    $all("#users-filter-chips .chip").forEach(c=>{ c.classList.remove("active"); c.setAttribute("aria-pressed","false"); });
     chip.classList.add("active");
+    chip.setAttribute("aria-pressed","true");
     state.users.filter = chip.dataset.filter;
     renderUsers();
   });
@@ -1444,8 +1609,8 @@ function userFormTemplate(user, readonly){
   return `
     <div class="form-grid">
       <div class="name-row">
-        <div class="field"><label for="f-lastname">Last Name</label><input id="f-lastname" type="text" value="${esc(u.lastName)}" ${dis} required></div>
-        <div class="field"><label for="f-firstname">First Name</label><input id="f-firstname" type="text" value="${esc(u.firstName)}" ${dis} required></div>
+        <div class="field"><label for="f-lastname">Last Name</label><input id="f-lastname" type="text" value="${esc(u.lastName)}" ${dis} required><div class="err"></div></div>
+        <div class="field"><label for="f-firstname">First Name</label><input id="f-firstname" type="text" value="${esc(u.firstName)}" ${dis} required><div class="err"></div></div>
         <div class="field"><label for="f-middleinitial">Middle Initial</label><input id="f-middleinitial" type="text" value="${esc(u.middleInitial)}" maxlength="1" autocomplete="off" ${dis}></div>
       </div>
       <div class="field"><label for="f-program">Course / Program</label>
@@ -1454,14 +1619,17 @@ function userFormTemplate(user, readonly){
       <div class="field"><label for="f-yearlevel">Year Level</label>
         <select id="f-yearlevel" ${dis}>${user && u.yearLevel==null ? `<option value="" selected>Not specified</option>` : ""}${[1,2,3,4,5].map(y=>`<option value="${y}" ${y===u.yearLevel?"selected":""}>Year ${y}</option>`).join("")}</select>
       </div>
-      <div class="field full"><label for="f-contact">Contact Information</label><input id="f-contact" type="email" value="${esc(u.contact)}" placeholder="name@feuroosevelt.edu" ${dis} required></div>
+      <div class="field full"><label for="f-contact">Contact Information</label><input id="f-contact" type="email" value="${esc(u.contact)}" placeholder="name@feuroosevelt.edu" ${dis} required><div class="err"></div></div>
       ${user ? `
       <div class="field"><label for="f-status">Account Status</label>${readonly
-        ? `<input type="text" value="${user.status}" disabled>`
+        ? `<input id="f-status" type="text" value="${esc(user.status)}" disabled>`
         : `<select id="f-status">${["Active","Inactive"].map(st=>`<option ${st===user.status?"selected":""}>${st}</option>`).join("")}</select>`}</div>
-      <div class="field"><label>Student ID</label><input type="text" value="${user.id}" disabled></div>
-      <div class="field full"><label>Currently Borrowed</label>
-        <input type="text" value="${user.borrowedBookIds.length ? user.borrowedBookIds.map(id=>(findBook(id)||{}).title).filter(Boolean).join(', ') : 'None'}" disabled></div>
+      <div class="field"><label for="f-userid">Student ID</label><input id="f-userid" type="text" value="${esc(user.id)}" disabled></div>
+      <div class="field full"><label for="f-hold">Borrowing Status</label>
+        <input id="f-hold" type="text" value="${esc(holdReason(user) ? "Blocked: " + [user.overdueLoans>0 ? user.overdueLoans+" overdue book"+(user.overdueLoans===1?"":"s") : "", user.unpaidFines>0 ? "unpaid fines "+peso(user.unpaidFines) : ""].filter(Boolean).join(" · ") : "Can borrow")}" disabled>
+        ${user.unpaidFines>0 ? `<button type="button" class="btn btn-secondary btn-sm" id="f-settle-fines" style="margin-top:8px;">Record payment of ${esc(peso(user.unpaidFines))}</button>` : ""}</div>
+      <div class="field full"><label for="f-borrowed">Currently Borrowed</label>
+        <input id="f-borrowed" type="text" value="${esc(user.borrowedBookIds.length ? user.borrowedBookIds.map(id=>(findBook(id)||{}).title).filter(Boolean).join(', ') : 'None')}" disabled></div>
       ` : ""}
     </div>`;
 }
@@ -1478,6 +1646,7 @@ function openUserModal(id, opts={}){
 
   renderModal({title, eyebrow, bodyHtml, footHtml, onMount:(modalEl)=>{
     wireFieldFocus(modalEl);
+    $("#f-settle-fines", modalEl)?.addEventListener("click", ()=> settleFines(user, readonly));
     if(readonly){
       $("#modal-to-edit", modalEl).addEventListener("click", ()=>{
         closeModal(()=> openUserModal(id));
@@ -1486,6 +1655,25 @@ function openUserModal(id, opts={}){
       $("#modal-save-user", modalEl).addEventListener("click", ()=> saveUserForm(modalEl, user));
     }
   }});
+}
+
+/* Records that the patron paid every outstanding fine. The server works out the amount itself. */
+function settleFines(user, readonly){
+  renderConfirm({
+    title:"Record payment?",
+    body:`Mark ${peso(user.unpaidFines)} in fines as paid by ${user.name}? Only do this after the money has been received.`,
+    confirmLabel:"Mark as paid",
+    onConfirm: async ()=>{
+      try {
+        const res = await api("transactions.php", { method:"POST", body: JSON.stringify({ type:"pay_fine", userId:user.id }) });
+        await refreshUser(user.id);
+        showToast(`Recorded ${peso(res.amount)} as paid.`);
+        closeModal(()=>{ renderUsers(); openUserModal(user.id, {readonly}); });
+      } catch (err) {
+        showToast(err.message, {kind:"error"});
+      }
+    },
+  });
 }
 
 async function saveUserForm(modalEl, existing){
@@ -1500,29 +1688,28 @@ async function saveUserForm(modalEl, existing){
   vals.name = formatUserName(vals.lastName, vals.firstName, vals.middleInitial);
   const statusEl = $("#f-status",modalEl);
   if(statusEl) vals.status = statusEl.value;
-  let missing=false;
-  [["f-lastname",vals.lastName],["f-firstname",vals.firstName],["f-contact",vals.contact]].forEach(([id,v])=>{
-    const field = document.getElementById(id).closest(".field");
-    if(!v){ field.classList.add("invalid"); missing=true; } else { field.classList.remove("invalid"); }
-  });
-  if(vals.contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(vals.contact)){
-    document.getElementById("f-contact").closest(".field").classList.add("invalid");
-    missing = true;
-  }
-  if(missing){ shakeModal(modalEl); return; }
+  let firstBad = null;
+  const flag = (id, msg)=>{ const el = $("#"+id, modalEl); setFieldError(el, msg); firstBad = firstBad || el; };
+  ["f-lastname","f-firstname","f-contact"].forEach(id=> clearFieldError($("#"+id, modalEl)));
+  if(!vals.lastName) flag("f-lastname","Enter the last name.");
+  if(!vals.firstName) flag("f-firstname","Enter the first name.");
+  if(!vals.contact) flag("f-contact","Enter an email address.");
+  else if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(vals.contact)) flag("f-contact","Enter a valid email address.");
+  if(firstBad){ shakeModal(modalEl); firstBad.focus(); return; }
 
   try {
+    let res;
     if(existing){
-      await api("users.php?id=" + encodeURIComponent(existing.id), { method:"PUT", body: JSON.stringify(vals) });
-      showToast(`${esc(vals.name)}’s record updated.`);
+      res = await api("users.php?id=" + encodeURIComponent(existing.id), { method:"PUT", body: JSON.stringify(vals) });
+      showToast(`${vals.name}’s record updated.`);
     } else {
-      await api("users.php", { method:"POST", body: JSON.stringify({ ...vals, status:"Active" }) });
+      res = await api("users.php", { method:"POST", body: JSON.stringify({ ...vals, status:"Active" }) });
       showToast("User registered successfully.");
     }
-    await refreshUsers();
+    if (res && res.user) upsertById(USERS, mapUser(res.user)); else await refreshUsers();
     closeModal(()=>{ renderUsers(); renderDashboard(); });
   } catch (err) {
-    showToast(err.message, {kind:"error"});
+    if(!showServerFieldErrors(modalEl, err, USER_FIELD_IDS)) showToast(err.message, {kind:"error"});
   }
 }
 
@@ -1536,7 +1723,7 @@ function confirmDeleteUser(id){
   const run = async ()=>{
     try {
       await api("users.php?id=" + encodeURIComponent(id), { method:"DELETE" });
-      await refreshUsers();
+      USERS = USERS.filter(u=>u.id!==id);
       renderUsers();
       renderDashboard();
       showToast("User removed from records.", {warn:true});
@@ -1547,7 +1734,7 @@ function confirmDeleteUser(id){
   if(!CONFIG.confirmDeletes){ run(); return; }
   renderConfirm({
     title:"Remove this user?",
-    body:`Remove “${esc(user.name)}” from the library records? This cannot be undone.`,
+    body:`Remove “${user.name}” from the library records? This cannot be undone.`,
     confirmLabel:"Remove",
     onConfirm:run,
   });
@@ -1559,8 +1746,12 @@ function confirmDeleteUser(id){
    ================================================================== */
 let activeModalCloseFn = null;
 let scrollLockCount = 0;
-function lockScroll(){ scrollLockCount++; document.body.style.overflow = "hidden"; }
-function unlockScroll(){ scrollLockCount = Math.max(0, scrollLockCount-1); if(scrollLockCount===0) document.body.style.overflow = ""; }
+function lockScroll(){ scrollLockCount++; document.body.style.overflow = "hidden"; $("#app")?.setAttribute("inert",""); }
+function unlockScroll(){
+  scrollLockCount = Math.max(0, scrollLockCount-1);
+  if(scrollLockCount===0){ document.body.style.overflow = ""; $("#app")?.removeAttribute("inert"); }
+}
+function restoreFocus(el){ if(el && el.isConnected && typeof el.focus === "function") el.focus(); }
 
 function renderModal({title, eyebrow, bodyHtml, footHtml, size, onMount}){
   const root = $("#modal-root");
@@ -1582,22 +1773,23 @@ function renderModal({title, eyebrow, bodyHtml, footHtml, size, onMount}){
     </div>`;
   const backdrop = $("#active-modal-backdrop", root);
   const modalEl = $(".modal", backdrop);
+  const opener = document.activeElement;
 
   function doClose(after){
-    closeModalEl(backdrop, modalEl, ()=>{ root.innerHTML=""; document.removeEventListener("keydown", escHandler); unlockScroll(); if(after) after(); });
+    closeModalEl(backdrop, modalEl, ()=>{ root.innerHTML=""; document.removeEventListener("keydown", escHandler); dialogKeyHandlers.delete(escHandler); unlockScroll(); restoreFocus(opener); if(after) after(); });
   }
   activeModalCloseFn = doClose;
 
   backdrop.addEventListener("click", e=>{ if(e.target===backdrop) doClose(); });
   $all("[data-close]", backdrop).forEach(b=> b.addEventListener("click", ()=>doClose()));
-  function escHandler(e){ if(e.key==="Escape") doClose(); }
+  function escHandler(e){ if(e.key==="Escape") doClose(); else trapTab(e, modalEl); }
   document.addEventListener("keydown", escHandler);
+  dialogKeyHandlers.add(escHandler);
 
   lockScroll();
-  openModalEl(backdrop, modalEl);
+  const firstInput = modalEl.querySelector(".modal-body input:not([disabled]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])") || modalEl.querySelector("button");
+  openModalEl(backdrop, modalEl, ()=> firstInput?.focus());
   if(onMount) onMount(modalEl);
-  const firstInput = modalEl.querySelector("input:not([disabled]), select:not([disabled]), button");
-  if(firstInput) setTimeout(()=>firstInput.focus(),380);
 }
 function closeModal(after){ if(activeModalCloseFn) activeModalCloseFn(after); }
 function shakeModal(modalEl){
@@ -1613,7 +1805,7 @@ function renderConfirm({title, body, confirmLabel, onConfirm}){
         <div class="modal-body" style="padding-top:24px;">
           <div class="cm-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.9 18.3A1.6 1.6 0 0 0 3.3 20.7h17.4a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-3.4 0z"/></svg></div>
           <h3 id="confirm-title" style="font-family:var(--font-display); font-size:18px; margin-bottom:8px;">${esc(title)}</h3>
-          <p>${body}</p>
+          <p>${esc(body)}</p>
         </div>
         <div class="modal-foot">
           <button class="btn btn-secondary" data-close>Cancel</button>
@@ -1623,26 +1815,45 @@ function renderConfirm({title, body, confirmLabel, onConfirm}){
     </div>`;
   const backdrop = $("#active-confirm-backdrop", root);
   const modalEl = $(".modal", backdrop);
+  const opener = document.activeElement;
   function doClose(after){
-    closeModalEl(backdrop, modalEl, ()=>{ root.innerHTML=""; document.removeEventListener("keydown", escHandler); unlockScroll(); if(after) after(); });
+    closeModalEl(backdrop, modalEl, ()=>{ root.innerHTML=""; document.removeEventListener("keydown", escHandler); dialogKeyHandlers.delete(escHandler); unlockScroll(); restoreFocus(opener); if(after) after(); });
   }
   backdrop.addEventListener("click", e=>{ if(e.target===backdrop) doClose(); });
   $all("[data-close]", backdrop).forEach(b=> b.addEventListener("click", ()=>doClose()));
-  function escHandler(e){ if(e.key==="Escape") doClose(); }
+  function escHandler(e){ if(e.key==="Escape") doClose(); else trapTab(e, modalEl); }
   document.addEventListener("keydown", escHandler);
+  dialogKeyHandlers.add(escHandler);
   $("#confirm-btn", backdrop).addEventListener("click", ()=>{ doClose(); onConfirm(); });
   lockScroll();
-  openModalEl(backdrop, modalEl);
-  setTimeout(()=> $("#confirm-btn", backdrop).focus(), 380);
+  openModalEl(backdrop, modalEl, ()=> $("#confirm-btn", backdrop)?.focus());
 }
 
 
 /* ==================================================================
-   ISSUE BOOK WORKFLOW
+   ISSUE BOOK: "desk mode". Student and book are picked on one screen (everything works from the keyboard)
+   and the loan is confirmed in the bar underneath. Each loan is still ONE request to api/transactions.php:
+   the server alone decides eligibility, availability, loan limit, dates and audit logging. The checks shown
+   on this screen (blocked students, titles on loan) only save staff a request that would be refused.
    ================================================================== */
-function resetIssueWizard(preBookId){
-  const pre = preBookId ? findBook(preBookId) : null;
-  state.issue = {step:1, studentId:null, bookId: pre && pre.status==="Available" ? pre.id : null};
+const ISSUE_ROW_CAP = 50;      // rows drawn per list; searching narrows the rest
+const issueLog = [];           // loans issued in this browser session, newest first
+let issueCount = 0;
+const issueUi = { sIdx:0, bIdx:0, busy:false, failed:false, sRows:[], bRows:[] };
+
+/* Why a student cannot borrow right now ("" when they can). Mirrors the server rules; the server has the last word. */
+function issueBlockReason(u){
+  const why = holdReason(u);
+  if(why) return why;
+  const max = CONFIG.maxBooksPerUser || 5;
+  return u.borrowedBookIds.length >= max ? `Loan limit reached (${u.borrowedBookIds.length} of ${max})` : "";
+}
+function issueBlockHint(u){
+  if(u.overdueLoans > 0) return "The overdue book must be returned first.";
+  if(u.unpaidFines > 0) return "Record the payment on the student's record (Users) first.";
+  return "A book must be returned before another can be issued.";
+}
+function resetIssueDates(){
   const issueInput = $("#issue-date");
   issueInput.value = isoDaysAgo(0);
   issueInput.readOnly = true;
@@ -1651,199 +1862,388 @@ function resetIssueWizard(preBookId){
   dueInput.min = isoDaysAgo(0);
   dueInput.max = isoDaysFromNow(CONFIG.loanDays);
   dueInput.value = dueInput.max;
+}
+function resetIssueWizard(preBookId){
+  const pre = preBookId ? findBook(preBookId) : null;
+  state.issue = { studentId:null, bookId: pre && pre.status==="Available" ? pre.id : null, sq:"", bq:"", availOnly:true, keep:true };
+  Object.assign(issueUi, { sIdx:0, bIdx:0, busy:false, failed:false });
+  resetIssueDates();
   $("#issue-student-search").value = "";
   $("#issue-book-search").value = "";
-  $("#issue-next-1").disabled = true;
-  $("#issue-next-2").disabled = !state.issue.bookId;
-  renderIssueStudentList("");
-  renderIssueBookList("");
-  goToIssueStep(1, true);
+  $("#issue-keep").checked = true;
+  $("#issue-avail").setAttribute("aria-pressed", "true");
+  $("#issue-avail").classList.add("active");
+  $("#issue-error").hidden = true;
+  $("#issue-result").hidden = true;
+  $("#issue-student-msg").textContent = "";
+  $("#issue-book-msg").textContent = "";
+  renderIssue();
 }
 
-function goToIssueStep(n, instant){
-  state.issue.step = n;
-  $all("#issue-rail .wizard-step").forEach(el=>{
-    const s = parseInt(el.dataset.step,10);
-    el.classList.toggle("current", s===n);
-    el.classList.toggle("done", s<n);
-  });
-  $all(".wz-stage", $("#view-issue")).forEach(stage=>{
-    stage.classList.toggle("active", stage.id === "issue-stage-"+n);
-  });
-  if(!instant){
-    const stage = $("#issue-stage-"+n);
-    gsap.fromTo(stage,{opacity:0,x:16},{opacity:1,x:0,duration:0.4,ease:"power2.out"});
-  }
+function renderIssueStudentList(scroll){
+  const list = $("#issue-student-list"), input = $("#issue-student-search");
+  const q = state.issue.sq.trim().toLowerCase(), max = CONFIG.maxBooksPerUser || 5;
+  const all = USERS.filter(u=> u.status==="Active" && (!q || userNameMatches(u, q) || u.id.toLowerCase().includes(q)));
+  const rows = all.slice(0, ISSUE_ROW_CAP);
+  issueUi.sRows = rows;
+  issueUi.sIdx = Math.min(issueUi.sIdx, Math.max(0, rows.length - 1));
+  list.innerHTML = rows.map((u,k)=>{
+    const why = issueBlockReason(u);
+    return `<div class="issue-row${k===issueUi.sIdx ? " hi" : ""}" role="option" id="issue-s-${k}" aria-selected="${k===issueUi.sIdx}"${why ? ` aria-disabled="true"` : ""} data-k="${k}">
+      <span class="mini-avatar">${esc(initialsOf(u.name))}</span>
+      <span class="issue-who"><span class="issue-name">${esc(u.name)}</span><small>${esc(u.id)} &middot; ${esc(u.program || "—")}</small></span>
+      ${why ? `<span class="badge badge-overdue">${esc(why)}</span>` : `<span class="badge badge-available">${u.borrowedBookIds.length}/${max} loans</span>`}
+    </div>`;
+  }).join("") + (all.length > rows.length ? `<div class="issue-empty">Showing ${rows.length} of ${all.length}. Keep typing to narrow the list.</div>` : "")
+    || `<div class="issue-empty">No active student matches your search.</div>`;
+  if(rows.length) input.setAttribute("aria-activedescendant", "issue-s-" + issueUi.sIdx); else input.removeAttribute("aria-activedescendant");
+  if(scroll) list.querySelector(".hi")?.scrollIntoView({block:"nearest"});
+}
+function renderIssueBookList(scroll){
+  const list = $("#issue-book-list"), input = $("#issue-book-search");
+  const q = state.issue.bq.trim().toLowerCase();
+  const all = BOOKS.filter(b=> (!state.issue.availOnly || b.status==="Available")
+    && (!q || [b.title, b.author, b.category, b.location, b.isbn].some(v=> String(v ?? "").toLowerCase().includes(q))));
+  const rows = all.slice(0, ISSUE_ROW_CAP);
+  issueUi.bRows = rows;
+  issueUi.bIdx = Math.min(issueUi.bIdx, Math.max(0, rows.length - 1));
+  list.innerHTML = rows.map((b,k)=>{
+    const out = b.status !== "Available";
+    return `<div class="issue-row${k===issueUi.bIdx ? " hi" : ""}" role="option" id="issue-b-${k}" aria-selected="${k===issueUi.bIdx}"${out ? ` aria-disabled="true"` : ""} data-k="${k}">
+      <span class="issue-who"><span class="issue-name">${esc(b.title)}</span><small>${esc(b.author)} &middot; Shelf ${esc(b.location || "—")}</small></span>
+      ${out ? `<span class="badge ${b.status==="Overdue" ? "badge-overdue" : "badge-borrowed"}">On loan${b.dueDate ? " &middot; due " + esc(fmtDate(b.dueDate)) : ""}</span>` : `<span class="badge badge-available">Available</span>`}
+    </div>`;
+  }).join("") + (all.length > rows.length ? `<div class="issue-empty">Showing ${rows.length} of ${all.length}. Keep typing to narrow the list.</div>` : "")
+    || `<div class="issue-empty">No title matches. Try another search${state.issue.availOnly ? ", or turn off “Available only”" : ""}.</div>`;
+  if(rows.length) input.setAttribute("aria-activedescendant", "issue-b-" + issueUi.bIdx); else input.removeAttribute("aria-activedescendant");
+  if(scroll) list.querySelector(".hi")?.scrollIntoView({block:"nearest"});
 }
 
-function renderIssueStudentList(q){
-  const list = $("#issue-student-list");
-  q = q.trim().toLowerCase();
-  const filtered = USERS.filter(u=> u.status==="Active" && (!q || userNameMatches(u, q) || u.id.toLowerCase().includes(q)));
-  list.innerHTML = filtered.map(u=>`
-    <div class="pick-row ${state.issue.studentId===u.id?'selected':''}" data-id="${u.id}">
-      <div class="pr-main"><div class="pr-title">${esc(u.name)}</div><div class="pr-sub">${u.id} &middot; ${esc(u.program)}</div></div>
-      <div class="mini-avatar">${initialsOf(u.name)}</div>
-    </div>`).join("") || `<div class="empty-state" style="padding:30px;"><div class="s">No matching students.</div></div>`;
-  $all(".pick-row", list).forEach(row=>{
-    row.addEventListener("click", ()=>{
-      state.issue.studentId = row.dataset.id;
-      renderIssueStudentList($("#issue-student-search").value);
-      $("#issue-next-1").disabled = false;
-    });
-  });
-}
-function renderIssueBookList(q){
-  const list = $("#issue-book-list");
-  q = q.trim().toLowerCase();
-  const filtered = BOOKS.filter(b=> b.status==="Available" && (!q || b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q)));
-  list.innerHTML = filtered.map(b=>`
-    <div class="pick-row ${state.issue.bookId===b.id?'selected':''}" data-id="${b.id}">
-      <div class="pr-main"><div class="pr-title">${esc(b.title)}</div><div class="pr-sub">${esc(b.author)} &middot; Shelf ${esc(b.location)}</div></div>
-      <span class="badge badge-available">Available</span>
-    </div>`).join("") || `<div class="empty-state" style="padding:30px;"><div class="s">No available titles match your search.</div></div>`;
-  $all(".pick-row", list).forEach(row=>{
-    row.addEventListener("click", ()=>{
-      state.issue.bookId = row.dataset.id;
-      renderIssueBookList($("#issue-book-search").value);
-      $("#issue-next-2").disabled = false;
-    });
-  });
-}
-
-$("#issue-student-search").addEventListener("input", e=> renderIssueStudentList(e.target.value));
-$("#issue-book-search").addEventListener("input", e=> renderIssueBookList(e.target.value));
-$("#issue-next-1").addEventListener("click", ()=> goToIssueStep(2));
-$("#issue-next-2").addEventListener("click", ()=>{
-  const student = findUser(state.issue.studentId), book = findBook(state.issue.bookId);
-  $("#issue-summary-student").innerHTML = `
-    <div class="cc-callno">PATRON RECORD</div>
-    <div class="cc-title">${esc(student.name)}</div>
-    <div class="cc-row"><span>ID</span><b>${student.id}</b></div>
-    <div class="cc-row"><span>Program</span><b>${esc(student.program)}</b></div>
-    <div class="cc-row"><span>Year</span><b>${student.yearLevel ?? "—"}</b></div>`;
-  $("#issue-summary-book").innerHTML = `
-    <div class="cc-callno">CALL NO. ${esc(book.location)}</div>
-    <div class="cc-title">${esc(book.title)}</div>
-    <div class="cc-row"><span>Author</span><b>${esc(book.author)}</b></div>
-    <div class="cc-row"><span>Category</span><b>${esc(book.category)}</b></div>
-    <div class="cc-row"><span>ISBN</span><b>${esc(book.isbn)}</b></div>`;
-  goToIssueStep(3);
-});
-$all('#issue-stage-2 [data-back], #issue-stage-3 [data-back]').forEach(b=>{
-  b.addEventListener("click", ()=> goToIssueStep(parseInt(b.dataset.back,10)));
-});
-$("#issue-confirm-btn").addEventListener("click", async ()=>{
+function renderIssueBar(){
+  const I = state.issue, student = I.studentId ? findUser(I.studentId) : null, book = I.bookId ? findBook(I.bookId) : null;
+  const ready = !!(student && book), max = CONFIG.maxBooksPerUser || 5;
+  $("#issue-bar").classList.toggle("ready", ready);
+  const grace = CONFIG.gracePeriodDays || 0;
+  const fines = CONFIG.overdueFinesEnabled ? `Fine ${peso(CONFIG.finePerDay)} per day after ${grace} grace day${grace===1 ? "" : "s"}` : "Overdue fines are off";
+  $("#issue-summary").innerHTML = ready
+    ? `<b>${esc(book.title)}</b> &rarr; <b>${esc(student.name)}</b><small>Loan ${student.borrowedBookIds.length + 1} of ${max} &middot; ${esc(fines)}</small>`
+    : `<span class="issue-hint">${!student ? "Select a student, then a book." : "Select a book to continue."}</span><small>Nothing is issued until you confirm.</small>`;
+  $("#issue-due-date").disabled = !ready;
   const btn = $("#issue-confirm-btn");
-  if(btn.disabled) return; // ignore double clicks while a request is in flight
-  const student = findUser(state.issue.studentId), book = findBook(state.issue.bookId);
-  if(!student || !book){
-    showToast("Select a patron and a book first.", {kind:"error"});
-    return;
+  btn.disabled = !ready || issueUi.busy;
+  btn.textContent = issueUi.busy ? "Issuing…" : issueUi.failed ? "Try again" : "Confirm & issue";
+}
+function renderIssueLog(){
+  $("#issue-log").innerHTML = issueLog.length
+    ? `<h2 class="issue-log-h">Issued this session &middot; ${issueCount}</h2>` + issueLog.map(l=>
+        `<div class="issue-log-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span><b>${esc(l.title)}</b> &rarr; ${esc(l.name)}</span><small>due ${esc(fmtDate(l.due))}</small></div>`).join("")
+    : "";
+}
+function renderIssue(){
+  const I = state.issue, student = I.studentId ? findUser(I.studentId) : null, book = I.bookId ? findBook(I.bookId) : null;
+  const max = CONFIG.maxBooksPerUser || 5;
+  $("#issue-student-find").hidden = !!student;
+  const ss = $("#issue-student-selected");
+  ss.hidden = !student;
+  if(student) ss.innerHTML = `<span class="mini-avatar">${esc(initialsOf(student.name))}</span><span class="issue-who"><span class="issue-name">${esc(student.name)}</span><small>${esc(student.id)} &middot; ${esc(student.program || "—")} &middot; ${student.borrowedBookIds.length}/${max} loans</small></span><button type="button" class="issue-change">Change</button>`;
+  $("#issue-book-find").hidden = !!book;
+  const bs = $("#issue-book-selected");
+  bs.hidden = !book;
+  if(book) bs.innerHTML = `<span class="issue-who"><span class="issue-name">${esc(book.title)}</span><small>${esc(book.author)} &middot; Shelf ${esc(book.location || "—")}</small></span><button type="button" class="issue-change">Change</button>`;
+  $("#issue-pane-student").classList.toggle("active", !student);
+  $("#issue-pane-book").classList.toggle("active", !!student && !book);
+  [["student", !!student, "1"], ["book", !!book, "2"]].forEach(([k, done, n])=>{
+    const i = $("#issue-num-" + k);
+    i.textContent = done ? "✓" : n;
+    i.classList.toggle("done", done);
+  });
+  if(!student) renderIssueStudentList();
+  if(!book) renderIssueBookList();
+  renderIssueBar();
+  renderIssueLog();
+}
+
+function pickIssueStudent(){
+  const u = issueUi.sRows[issueUi.sIdx], msg = $("#issue-student-msg");
+  if(!u) return;
+  const why = issueBlockReason(u);
+  if(why){ msg.textContent = `${u.name} cannot borrow: ${why.toLowerCase()}. ${issueBlockHint(u)}`; return; }
+  msg.textContent = "";
+  state.issue.studentId = u.id;
+  issueUi.failed = false;
+  renderIssue();
+  (state.issue.bookId ? $("#issue-confirm-btn") : $("#issue-book-search")).focus();
+}
+function pickIssueBook(){
+  const b = issueUi.bRows[issueUi.bIdx], msg = $("#issue-book-msg");
+  if(!b) return;
+  if(b.status !== "Available"){ msg.textContent = `“${b.title}” is on loan${b.dueDate ? " until " + fmtDate(b.dueDate) : ""}.`; return; }
+  msg.textContent = "";
+  state.issue.bookId = b.id;
+  issueUi.failed = false;
+  renderIssue();
+  (state.issue.studentId ? $("#issue-confirm-btn") : $("#issue-student-search")).focus();
+}
+/* Arrow keys move the highlighted row, Enter picks it, Escape clears the search box. */
+function issueKeys(e, kind){
+  const s = kind==="s", rows = s ? issueUi.sRows : issueUi.bRows, key = s ? "sIdx" : "bIdx";
+  const redraw = ()=> s ? renderIssueStudentList(true) : renderIssueBookList(true);
+  if(e.key==="ArrowDown" || e.key==="ArrowUp"){
+    e.preventDefault();
+    issueUi[key] = Math.max(0, Math.min(rows.length - 1, issueUi[key] + (e.key==="ArrowDown" ? 1 : -1)));
+    redraw();
+  } else if(e.key==="Enter" && !e.ctrlKey && !e.metaKey){
+    e.preventDefault();
+    s ? pickIssueStudent() : pickIssueBook();
+  } else if(e.key==="Escape" && e.target.value){
+    e.preventDefault();
+    e.target.value = "";
+    state.issue[s ? "sq" : "bq"] = "";
+    issueUi[key] = 0;
+    redraw();
   }
-  if(student.borrowedBookIds.length >= (CONFIG.maxBooksPerUser || 5)){
-    showToast(`Loan limit reached (${CONFIG.maxBooksPerUser} books per patron).`, {warn:true});
-    return;
-  }
+}
+
+async function submitIssue(){
+  if(issueUi.busy) return; // ignore double clicks and repeated shortcuts while a request is in flight
+  const I = state.issue, student = I.studentId ? findUser(I.studentId) : null, book = I.bookId ? findBook(I.bookId) : null;
+  const err = $("#issue-error");
+  if(!student || !book) return;
+  const why = issueBlockReason(student);
+  if(why){ err.textContent = `${student.name} cannot borrow: ${why.toLowerCase()}.`; err.hidden = false; return; }
   // Only IDs and the requested due date are sent; the server sets the issue date and validates everything.
   const dueDate = $("#issue-due-date").value || undefined;
-  btn.disabled = true;
+  issueUi.busy = true; issueUi.failed = false; err.hidden = true;
+  renderIssueBar();
   try {
     const res = await api("transactions.php", {
       method:"POST",
       body: JSON.stringify({ type:"issue", bookId: book.id, userId: student.id, dueDate }),
     });
     const tx = res.transaction || {};
-    try { await refreshCatalog(); }
+    try { await refreshAffected(book.id, student.id); }
     catch (e) { showToast("Issued, but the lists could not refresh. Reload the page.", {warn:true}); }
-    $("#issue-final-caption").innerHTML = `<b>${esc(book.title)}</b> issued to <b>${esc(student.name)}</b>, due ${fmtDate(tx.dueDate || dueDate)}.`;
-    goToIssueStep(4);
+    const due = tx.dueDate || dueDate;
+    issueLog.unshift({ title: book.title, name: student.name, due });
+    if(issueLog.length > 20) issueLog.pop();
+    issueCount++;
+    $("#issue-final-caption").innerHTML = `<b>${esc(book.title)}</b> issued to <b>${esc(student.name)}</b>, due ${fmtDate(due)}.`;
+    $("#issue-result").hidden = false;
     playStamp($("#issue-stamp"));
     showToast("Book issued successfully.");
     renderDashboard();
-  } catch (err) {
-    showToast(err.message, {kind:"error"});
-  } finally {
-    btn.disabled = false;
+    // Ready for the next loan: the book is cleared; the student stays when "Keep student" is ticked.
+    I.bookId = null; I.bq = ""; $("#issue-book-search").value = ""; issueUi.bIdx = 0;
+    if(!I.keep){ I.studentId = null; I.sq = ""; $("#issue-student-search").value = ""; issueUi.sIdx = 0; }
+    resetIssueDates();
+    $("#issue-student-msg").textContent = ""; $("#issue-book-msg").textContent = "";
+    issueUi.busy = false;
+    renderIssue();
+    (I.studentId ? $("#issue-book-search") : $("#issue-student-search")).focus();
+  } catch (e) {
+    issueUi.busy = false; issueUi.failed = true;
+    err.textContent = e.message; err.hidden = false;
+    renderIssueBar();
   }
+}
+
+$("#issue-student-search").addEventListener("input", e=>{ state.issue.sq = e.target.value; issueUi.sIdx = 0; renderIssueStudentList(); });
+$("#issue-book-search").addEventListener("input", e=>{ state.issue.bq = e.target.value; issueUi.bIdx = 0; renderIssueBookList(); });
+$("#issue-student-search").addEventListener("keydown", e=> issueKeys(e, "s"));
+$("#issue-book-search").addEventListener("keydown", e=> issueKeys(e, "b"));
+$("#issue-student-list").addEventListener("click", e=>{
+  const row = e.target.closest(".issue-row");
+  if(row && row.dataset.k !== undefined){ issueUi.sIdx = +row.dataset.k; pickIssueStudent(); }
 });
-$("#issue-restart-btn").addEventListener("click", resetIssueWizard);
+$("#issue-book-list").addEventListener("click", e=>{
+  const row = e.target.closest(".issue-row");
+  if(row && row.dataset.k !== undefined){ issueUi.bIdx = +row.dataset.k; pickIssueBook(); }
+});
+$("#issue-student-selected").addEventListener("click", e=>{
+  if(!e.target.closest(".issue-change")) return;
+  state.issue.studentId = null; state.issue.sq = ""; $("#issue-student-search").value = ""; issueUi.sIdx = 0; issueUi.failed = false;
+  renderIssue(); $("#issue-student-search").focus();
+});
+$("#issue-book-selected").addEventListener("click", e=>{
+  if(!e.target.closest(".issue-change")) return;
+  state.issue.bookId = null; state.issue.bq = ""; $("#issue-book-search").value = ""; issueUi.bIdx = 0; issueUi.failed = false;
+  renderIssue(); $("#issue-book-search").focus();
+});
+$("#issue-avail").addEventListener("click", ()=>{
+  state.issue.availOnly = !state.issue.availOnly;
+  $("#issue-avail").setAttribute("aria-pressed", String(state.issue.availOnly));
+  $("#issue-avail").classList.toggle("active", state.issue.availOnly);
+  issueUi.bIdx = 0; renderIssueBookList();
+});
+$("#issue-keep").addEventListener("change", e=>{ state.issue.keep = e.target.checked; });
+$("#issue-due-date").addEventListener("change", ()=>{ $("#issue-error").hidden = true; issueUi.failed = false; renderIssueBar(); });
+$("#issue-confirm-btn").addEventListener("click", submitIssue);
+/* Ctrl+Enter (or Cmd+Enter) confirms from anywhere on this screen once a student and a book are chosen. */
+document.addEventListener("keydown", e=>{
+  if(e.key!=="Enter" || !(e.ctrlKey || e.metaKey) || state.currentView!=="issue" || scrollLockCount>0) return;
+  if(getComputedStyle($("#app")).visibility === "hidden") return; // sign-in screen
+  const btn = $("#issue-confirm-btn");
+  if(btn && !btn.disabled){ e.preventDefault(); submitIssue(); }
+});
 
 /* ==================================================================
-   RETURN BOOK WORKFLOW
+   RETURN BOOK: same desk layout as Issue. Search open loans, review
+   dates and the estimated fine, then confirm. The server still computes
+   the real fine and updates the loan; nothing is returned until confirm.
    ================================================================== */
+const RETURN_ROW_CAP = 50;
+const returnLog = [];
+let returnCount = 0;
+const returnUi = { idx:0, busy:false, failed:false, rows:[] };
+
 function resetReturnWizard(){
-  state.ret = {step:1, bookId:null};
+  state.ret = { bookId:null, q:"", returnDate:null, fine:0, overdueDays:0 };
+  Object.assign(returnUi, { idx:0, busy:false, failed:false });
   $("#return-search").value = "";
-  $("#return-confirm-panel").style.display = "flex";
-  $("#return-final-panel").style.display = "none";
-  renderReturnLoanList("");
-  goToReturnStep(1, true);
+  $("#return-loan-msg").textContent = "";
+  $("#return-error").hidden = true;
+  $("#return-result").hidden = true;
+  const rd = $("#return-date-input");
+  rd.value = isoDaysAgo(0);
+  rd.max = isoDaysAgo(0);
+  rd.min = "";
+  renderReturn();
 }
-function goToReturnStep(n, instant){
-  state.ret.step = n;
-  $all("#return-rail .wizard-step").forEach(el=>{
-    const s = parseInt(el.dataset.step,10);
-    el.classList.toggle("current", s===n);
-    el.classList.toggle("done", s<n);
-  });
-  $all(".wz-stage", $("#view-return")).forEach(stage=>{
-    stage.classList.toggle("active", stage.id === "return-stage-"+n);
-  });
-  if(!instant){
-    const stage = $("#return-stage-"+n);
-    gsap.fromTo(stage,{opacity:0,x:16},{opacity:1,x:0,duration:0.4,ease:"power2.out"});
+
+function openLoansMatching(q){
+  q = q.trim().toLowerCase();
+  return BOOKS.filter(b=> (b.status==="Borrowed"||b.status==="Overdue") &&
+    (!q || b.title.toLowerCase().includes(q) || userNameMatches(findUser(b.borrowedBy), q)));
+}
+
+function renderReturnLoanList(scroll){
+  const list = $("#return-loan-list"), input = $("#return-search");
+  const all = openLoansMatching(state.ret.q);
+  const hasOpenLoans = BOOKS.some(b=>b.status==="Borrowed"||b.status==="Overdue");
+  const rows = all.slice(0, RETURN_ROW_CAP);
+  returnUi.rows = rows;
+  returnUi.idx = Math.min(returnUi.idx, Math.max(0, rows.length - 1));
+  list.innerHTML = rows.map((b,k)=>{
+    const u = findUser(b.borrowedBy);
+    return `<div class="issue-row${k===returnUi.idx ? " hi" : ""}" role="option" id="return-l-${k}" aria-selected="${k===returnUi.idx}" data-k="${k}">
+      <span class="issue-who"><span class="issue-name">${esc(b.title)}</span><small>${esc(u?u.name:"—")} &middot; due ${esc(fmtDate(b.dueDate))}</small></span>
+      <span class="badge ${badgeClassFor(b.status)}">${esc(b.status)}</span>
+    </div>`;
+  }).join("") + (all.length > rows.length ? `<div class="issue-empty">Showing ${rows.length} of ${all.length}. Keep typing to narrow the list.</div>` : "")
+    || `<div class="issue-empty">${hasOpenLoans
+      ? "No borrowed titles match your search."
+      : "No books are currently borrowed. Issue a book first; active loans will appear here."}</div>`;
+  if(rows.length) input.setAttribute("aria-activedescendant", "return-l-" + returnUi.idx); else input.removeAttribute("aria-activedescendant");
+  if(scroll) list.querySelector(".hi")?.scrollIntoView({block:"nearest"});
+}
+
+function renderReturnDetails(){
+  const b = state.ret.bookId ? findBook(state.ret.bookId) : null;
+  const empty = $("#return-details-empty"), body = $("#return-details-body");
+  empty.hidden = !!b;
+  body.hidden = !b;
+  if(!b) return;
+  const u = findUser(b.borrowedBy) || {name:b.borrowedBy || "Unknown patron", id:b.borrowedBy || "—", program:"—"};
+  $("#return-facts").innerHTML = `
+    <div class="return-fact">
+      <span class="return-fact-label">Book</span>
+      <div class="issue-sel">
+        <span class="issue-who"><span class="issue-name">${esc(b.title)}</span><small>${esc(b.author || "—")} &middot; Shelf ${esc(b.location || "—")} &middot; ${esc(b.category || "—")}</small></span>
+        <span class="badge ${badgeClassFor(b.status)}">${esc(b.status)}</span>
+      </div>
+    </div>
+    <div class="return-fact">
+      <span class="return-fact-label">Borrower</span>
+      <div class="issue-sel">
+        <span class="mini-avatar">${esc(initialsOf(u.name))}</span>
+        <span class="issue-who"><span class="issue-name">${esc(u.name)}</span><small>${esc(u.id)} &middot; ${esc(u.program || "—")}</small></span>
+      </div>
+    </div>`;
+  $("#return-issue-date-display").value = fmtDate(b.issueDate);
+  $("#return-due-date-display").value = fmtDate(b.dueDate);
+}
+
+function renderReturnBar(){
+  const b = state.ret.bookId ? findBook(state.ret.bookId) : null;
+  const u = b ? findUser(b.borrowedBy) : null;
+  const ready = !!(b && (b.status==="Borrowed" || b.status==="Overdue"));
+  $("#return-bar").classList.toggle("ready", ready);
+  const fineNote = ready
+    ? (state.ret.fine > 0 ? `Estimated fine ${peso(state.ret.fine)} (assessed on return)` : "No fine estimated")
+    : "Nothing is returned until you confirm.";
+  $("#return-summary").innerHTML = ready
+    ? `<b>${esc(b.title)}</b> &larr; <b>${esc(u ? u.name : (b.borrowedBy || "—"))}</b><small>${esc(fineNote)}</small>`
+    : `<span class="issue-hint">Select a borrowed title to continue.</span><small>${esc(fineNote)}</small>`;
+  $("#return-date-input").disabled = !ready;
+  const btn = $("#return-confirm-btn");
+  btn.disabled = !ready || returnUi.busy;
+  btn.textContent = returnUi.busy ? "Returning…" : returnUi.failed ? "Try again" : "Confirm return";
+}
+
+function renderReturnLog(){
+  $("#return-log").innerHTML = returnLog.length
+    ? `<h2 class="issue-log-h">Returned this session &middot; ${returnCount}</h2>` + returnLog.map(l=>
+        `<div class="issue-log-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span><b>${esc(l.title)}</b> &larr; ${esc(l.name)}</span><small>${l.fine>0 ? "fine "+peso(l.fine) : "no fine"}</small></div>`).join("")
+    : "";
+}
+
+function renderReturn(){
+  const b = state.ret.bookId ? findBook(state.ret.bookId) : null;
+  $("#return-loan-find").hidden = !!b;
+  const sel = $("#return-loan-selected");
+  sel.hidden = !b;
+  if(b){
+    const u = findUser(b.borrowedBy);
+    sel.innerHTML = `<span class="issue-who"><span class="issue-name">${esc(b.title)}</span><small>${esc(u?u.name:"—")} &middot; due ${esc(fmtDate(b.dueDate))}</small></span><button type="button" class="issue-change">Change</button>`;
+  }
+  $("#return-pane-loan").classList.toggle("active", !b);
+  $("#return-pane-details").classList.toggle("active", !!b);
+  const loanNum = $("#return-num-loan"), detNum = $("#return-num-details");
+  loanNum.textContent = b ? "✓" : "1";
+  loanNum.classList.toggle("done", !!b);
+  detNum.textContent = b ? "✓" : "2";
+  detNum.classList.toggle("done", !!b);
+  if(!b) renderReturnLoanList();
+  renderReturnDetails();
+  if(b) updateReturnCalc();
+  else renderReturnBar();
+  renderReturnLog();
+}
+
+function pickReturnLoan(){
+  const b = returnUi.rows[returnUi.idx], msg = $("#return-loan-msg");
+  if(!b) return;
+  if(b.status!=="Borrowed" && b.status!=="Overdue"){ msg.textContent = `“${b.title}” is not currently on loan.`; return; }
+  msg.textContent = "";
+  state.ret.bookId = b.id;
+  returnUi.failed = false;
+  $("#return-error").hidden = true;
+  const rd = $("#return-date-input");
+  rd.max = isoDaysAgo(0);
+  rd.min = b.issueDate || "";
+  rd.value = isoDaysAgo(0);
+  renderReturn();
+  $("#return-confirm-btn").focus();
+}
+
+function returnKeys(e){
+  const rows = returnUi.rows;
+  if(e.key==="ArrowDown" || e.key==="ArrowUp"){
+    e.preventDefault();
+    returnUi.idx = Math.max(0, Math.min(rows.length - 1, returnUi.idx + (e.key==="ArrowDown" ? 1 : -1)));
+    renderReturnLoanList(true);
+  } else if(e.key==="Enter" && !e.ctrlKey && !e.metaKey){
+    e.preventDefault();
+    pickReturnLoan();
+  } else if(e.key==="Escape" && e.target.value){
+    e.preventDefault();
+    e.target.value = "";
+    state.ret.q = "";
+    returnUi.idx = 0;
+    renderReturnLoanList();
   }
 }
-function renderReturnLoanList(q){
-  const list = $("#return-loan-list");
-  q = q.trim().toLowerCase();
-  const loans = BOOKS.filter(b=> (b.status==="Borrowed"||b.status==="Overdue") &&
-    (!q || b.title.toLowerCase().includes(q) || userNameMatches(findUser(b.borrowedBy), q)));
-  list.innerHTML = loans.map(b=>{
-    const u = findUser(b.borrowedBy);
-    return `<div class="pick-row" data-id="${b.id}">
-      <div class="pr-main"><div class="pr-title">${esc(b.title)}</div><div class="pr-sub">${esc(u?u.name:"—")} &middot; due ${fmtDate(b.dueDate)}</div></div>
-      <span class="badge ${badgeClassFor(b.status)}">${b.status}</span>
-    </div>`;
-  }).join("") || `<div class="empty-state" style="padding:30px;"><div class="s">No borrowed titles match your search.</div></div>`;
-  $all(".pick-row", list).forEach(row=>{
-    row.addEventListener("click", ()=>{
-      state.ret.bookId = row.dataset.id;
-      const b = findBook(state.ret.bookId);
-      const u = findUser(b.borrowedBy) || {name:b.borrowedBy || "Unknown patron", id:b.borrowedBy || "—", program:"—"};
-      $("#return-summary-book").innerHTML = `
-        <div class="cc-callno">CALL NO. ${esc(b.location)}</div>
-        <div class="cc-title">${esc(b.title)}</div>
-        <div class="cc-row"><span>Author</span><b>${esc(b.author)}</b></div>
-        <div class="cc-row"><span>Category</span><b>${esc(b.category)}</b></div>`;
-      $("#return-summary-student").innerHTML = `
-        <div class="cc-callno">PATRON RECORD</div>
-        <div class="cc-title">${esc(u.name)}</div>
-        <div class="cc-row"><span>ID</span><b>${u.id}</b></div>
-        <div class="cc-row"><span>Program</span><b>${esc(u.program)}</b></div>`;
-      $("#return-issue-date-display").value = fmtDate(b.issueDate);
-      $("#return-due-date-display").value = fmtDate(b.dueDate);
-      const rd = $("#return-date-input");
-      rd.max = isoDaysAgo(0);
-      rd.min = b.issueDate || "";
-      rd.value = isoDaysAgo(0);
-      updateReturnCalc();
-      goToReturnStep(2);
-    });
-  });
-}
-$("#return-search").addEventListener("input", e=> renderReturnLoanList(e.target.value));
-$all('#return-stage-2 [data-back], #return-stage-3 [data-back], #return-stage-4 [data-back]').forEach(b=>{
-  b.addEventListener("click", ()=> goToReturnStep(parseInt(b.dataset.back,10)));
-});
-$all('[data-next-return]').forEach(b=>{
-  b.addEventListener("click", ()=>{
-    const n = parseInt(b.dataset.nextReturn,10);
-    if(n===4) updateReturnCalc();
-    goToReturnStep(n);
-  });
-});
+
 function updateReturnCalc(){
   const b = findBook(state.ret.bookId);
   if(!b) return;
@@ -1865,21 +2265,25 @@ function updateReturnCalc(){
     : `${overdueDays} day(s) overdue · ${grace}d grace · ₱${rate.toFixed(2)} / day`;
   const amountEl = $("#return-fine-amount");
   amountEl.classList.toggle("zero", fine===0);
-  animateNumber(amountEl, 0, fine, {duration:0.9});
+  amountEl.textContent = peso(fine);
   state.ret.returnDate = returnDate;
   state.ret.fine = fine;
   state.ret.overdueDays = overdueDays;
+  renderReturnBar();
 }
-$("#return-date-input").addEventListener("change", updateReturnCalc);
-$("#return-confirm-btn").addEventListener("click", async ()=>{
-  const btn = $("#return-confirm-btn");
-  if(btn.disabled) return; // ignore double clicks while a request is in flight
+
+async function submitReturn(){
+  if(returnUi.busy) return;
   const b = findBook(state.ret.bookId);
-  if(!b){
-    showToast("Select a loan first.", {kind:"error"});
+  const err = $("#return-error");
+  if(!b){ err.textContent = "Select a loan first."; err.hidden = false; return; }
+  if(b.status!=="Borrowed" && b.status!=="Overdue"){
+    err.textContent = "This title is not currently on loan.";
+    err.hidden = false;
     return;
   }
-  btn.disabled = true;
+  returnUi.busy = true; returnUi.failed = false; err.hidden = true;
+  renderReturnBar();
   try {
     // The server computes the fine and ignores any client-supplied amount, status, or names.
     const res = await api("transactions.php", {
@@ -1888,36 +2292,319 @@ $("#return-confirm-btn").addEventListener("click", async ()=>{
     });
     const fine = Number(res.fine || 0);
     const who = (res.transaction && res.transaction.userName) || "the patron";
-    try { await refreshCatalog(); }
+    try { await refreshAffected(b.id, b.borrowedBy); }
     catch (e) { showToast("Returned, but the lists could not refresh. Reload the page.", {warn:true}); }
     $("#return-final-caption").innerHTML = fine>0
-      ? `<b>${esc(b.title)}</b> returned by <b>${esc(who)}</b>. Fine assessed: <b>₱${fine.toFixed(2)}</b>.`
+      ? `<b>${esc(b.title)}</b> returned by <b>${esc(who)}</b>. Fine assessed: <b>₱${fine.toFixed(2)}</b> (unpaid until the payment is recorded on the patron's record).`
       : `<b>${esc(b.title)}</b> returned by <b>${esc(who)}</b> on time. No fine due.`;
-    $("#return-confirm-panel").style.display="none";
-    $("#return-final-panel").style.display="flex";
+    $("#return-result").hidden = false;
     playStamp($("#return-stamp"));
     showToast(fine>0 ? `Fine assessed: ₱${fine.toFixed(2)}` : "Book returned successfully.", {warn: fine>0});
     renderDashboard();
-  } catch (err) {
-    showToast(err.message, {kind:"error"});
-  } finally {
-    btn.disabled = false;
+    returnLog.unshift({ title: b.title, name: who, fine });
+    if(returnLog.length > 20) returnLog.pop();
+    returnCount++;
+    state.ret.bookId = null; state.ret.q = ""; $("#return-search").value = ""; returnUi.idx = 0;
+    $("#return-loan-msg").textContent = "";
+    returnUi.busy = false;
+    renderReturn();
+    $("#return-search").focus();
+  } catch (e) {
+    returnUi.busy = false; returnUi.failed = true;
+    err.textContent = e.message; err.hidden = false;
+    renderReturnBar();
   }
+}
+
+$("#return-search").addEventListener("input", e=>{ state.ret.q = e.target.value; returnUi.idx = 0; renderReturnLoanList(); });
+$("#return-search").addEventListener("keydown", returnKeys);
+$("#return-loan-list").addEventListener("click", e=>{
+  const row = e.target.closest(".issue-row");
+  if(row && row.dataset.k !== undefined){ returnUi.idx = +row.dataset.k; pickReturnLoan(); }
 });
+$("#return-loan-selected").addEventListener("click", e=>{
+  if(!e.target.closest(".issue-change")) return;
+  state.ret.bookId = null; state.ret.q = ""; $("#return-search").value = ""; returnUi.idx = 0; returnUi.failed = false;
+  $("#return-error").hidden = true;
+  renderReturn(); $("#return-search").focus();
+});
+$("#return-date-input").addEventListener("change", ()=>{ $("#return-error").hidden = true; returnUi.failed = false; updateReturnCalc(); });
+$("#return-confirm-btn").addEventListener("click", submitReturn);
 $("#return-restart-btn").addEventListener("click", resetReturnWizard);
+document.addEventListener("keydown", e=>{
+  if(e.key!=="Enter" || !(e.ctrlKey || e.metaKey) || state.currentView!=="return" || scrollLockCount>0) return;
+  if(getComputedStyle($("#app")).visibility === "hidden") return;
+  const btn = $("#return-confirm-btn");
+  if(btn && !btn.disabled){ e.preventDefault(); submitReturn(); }
+});
 
 
 /* ==================================================================
    REPORTS
    ================================================================== */
+/* ==================================================================
+   OVERDUE REPORT: summary cards, ranked chart, searchable / sortable / paged table.
+   Everything is computed in the browser from api/reports.php (`overdue` rows); no API change.
+   Fines shown here are ESTIMATES: the real fine is written when the book is returned.
+   ================================================================== */
+/* Severity bands by days late. Change the thresholds here and the chips, chart zones and badges follow. */
+const OVERDUE_BANDS = [
+  {id:"crit", min:15, name:"Critical", short:"15+ d",  legend:"15+ days",  cls:"sev-high"},
+  {id:"mid",  min:8,  name:"High",     short:"8–14 d", legend:"8–14 days", cls:"sev-mid"},
+  {id:"low",  min:1,  name:"Recent",   short:"1–7 d",  legend:"1–7 days",  cls:"sev-low"},
+];
+const OVERDUE_PAGE_SIZE = 10;
+const OVERDUE_CHART_ROWS = 8;
+function overdueBand(days){ return OVERDUE_BANDS.find(b=>days>=b.min) || OVERDUE_BANDS[OVERDUE_BANDS.length-1]; }
+const OVERDUE_SORTS = {
+  days:(a,b)=> b.daysLate - a.daysLate || String(a.dueDate).localeCompare(String(b.dueDate)),
+  fine:(a,b)=> b.estimatedFine - a.estimatedFine || b.daysLate - a.daysLate,
+  due:(a,b)=> String(a.dueDate).localeCompare(String(b.dueDate)),
+  title:(a,b)=> String(a.bookTitle).localeCompare(String(b.bookTitle)),
+  borrower:(a,b)=> String(a.userName || "").localeCompare(String(b.userName || "")),
+};
+function overdueFiltered(rows){
+  const {q, band, sort} = state.overdue;
+  const needle = q.trim().toLowerCase();
+  return rows
+    .filter(o=> (band==="all" || overdueBand(o.daysLate).id===band)
+      && (!needle || (String(o.bookTitle) + " " + String(o.userName || "")).toLowerCase().includes(needle)))
+    .sort(OVERDUE_SORTS[sort] || OVERDUE_SORTS.days);
+}
+
+/* Ranked bars (most overdue first, top 8 of whatever the filters leave). The axis is sized from ALL overdue
+   loans so bars do not rescale while filtering. Zones behind the bars mark the severity bands. */
+function renderOverdueChart(wrap, rowsAll, shown, animate){
+  if(!rowsAll.length){
+    wrap.innerHTML = `<div class="empty-state" style="padding:40px;"><div class="s">Nothing overdue right now.</div></div>`;
+    return;
+  }
+  if(!shown.length){
+    wrap.innerHTML = `<div class="chart-empty">No loans to chart. Clear the search or filter.</div>`;
+    return;
+  }
+  const step = OVERDUE_BANDS[1].min - 1; // 7: one axis step is the width of the 1–7 day band
+  const peak = Math.max(...rowsAll.map(o=>o.daysLate));
+  const axisMax = Math.max(step*3, Math.ceil((peak + Math.max(2, Math.round(peak*0.08))) / step) * step);
+  const tickStep = step * Math.ceil(axisMax / step / 4);
+  const ticks = [];
+  for(let t=0; t<=axisMax; t+=tickStep) ticks.push(t);
+  const z1 = (step/axisMax*100).toFixed(2), z2 = ((OVERDUE_BANDS[0].min-1)/axisMax*100).toFixed(2);
+  const bars = shown.slice().sort(OVERDUE_SORTS.days).slice(0, OVERDUE_CHART_ROWS);
+  const rowsHtml = bars.map(o=>{
+    const b = overdueBand(o.daysLate), w = (o.daysLate/axisMax*100).toFixed(2);
+    const tip = `${o.bookTitle} · ${o.userName || "—"} · due ${fmtDate(o.dueDate)} · ${o.daysLate} days late · est. ${peso(o.estimatedFine)}`;
+    return `<div class="od-crow" title="${esc(tip)}"><span class="od-ct">${esc(o.bookTitle)}</span>
+      <div class="od-track"><div class="od-bar ${b.cls}" data-w="${w}"${animate ? "" : ` style="width:${w}%"`}><span class="od-val">${o.daysLate} d</span></div></div></div>`;
+  }).join("");
+  wrap.innerHTML = `<div class="od-chart" style="--z1:${z1}%; --z2:${z2}%;">
+    <div class="od-lg">${OVERDUE_BANDS.slice().reverse().map(b=>`<span><i class="${b.cls}"></i>${b.legend}</span>`).join("")}</div>
+    <div role="img" aria-label="Bar chart of days late for the ${bars.length} most overdue loans. The table below lists every loan.">
+      ${rowsHtml}
+      <div class="od-axis"><span></span><div class="od-ticks">${ticks.map((t,i)=>`<span${i ? "" : ` class="first"`} style="left:${(t/axisMax*100).toFixed(2)}%">${t ? t + " days" : "0"}</span>`).join("")}</div></div>
+    </div>
+    ${shown.length > OVERDUE_CHART_ROWS ? `<div class="od-note">Showing the ${OVERDUE_CHART_ROWS} most overdue of ${shown.length} loans. The table lists every loan.</div>` : ""}
+  </div>`;
+  if(animate) requestAnimationFrame(()=> $all(".od-bar", wrap).forEach((el,i)=> gsap.to(el,{width:el.dataset.w+"%", duration:0.8, delay:0.05*i})));
+}
+
+function renderOverdueReport(r, ctx){
+  const {chartWrap, theadRow, tbody} = ctx;
+  const rows = r.overdue || [];
+  const S = state.overdue;
+  const byId = id=> document.getElementById(id);
+  const cards = byId("overdue-cards"), toolbar = byId("overdue-toolbar"), foot = byId("overdue-foot"), list = byId("overdue-card-list");
+
+  const estTotal = r.totals && r.totals.estimatedOverdueFines != null ? r.totals.estimatedOverdueFines : rows.reduce((n,o)=>n+o.estimatedFine, 0);
+  const top = rows.reduce((m,o)=> (!m || o.daysLate > m.daysLate) ? o : m, null);
+  const borrowers = new Set(rows.map(o=> o.userId || o.userName)).size;
+  cards.hidden = false;
+  cards.innerHTML = `
+    <div class="od-card"><span class="od-card-k">Overdue loans</span><b>${rows.length}</b><span class="od-card-f">open past their due date</span></div>
+    <div class="od-card"><span class="od-card-k">Estimated fines</span><b>${peso(estTotal)}</b><span class="od-card-f">assessed when returned</span></div>
+    <div class="od-card"><span class="od-card-k">Most overdue</span><b>${top ? top.daysLate + " days" : "—"}</b><span class="od-card-f">${top ? esc(top.bookTitle) : "No overdue loans"}</span></div>
+    <div class="od-card"><span class="od-card-k">Affected borrowers</span><b>${borrowers}</b><span class="od-card-f">blocked from new loans</span></div>`;
+
+  theadRow.innerHTML = "<th scope='col'>Priority</th><th scope='col'>Book</th><th scope='col'>Borrower</th><th scope='col'>Due Date</th><th scope='col' class='od-num'>Days Late</th><th scope='col' class='od-num' title='(days late − grace days) × daily rate. Assessed when the book is returned.'>Est. Fine</th>";
+
+  if(!rows.length){
+    toolbar.hidden = true; foot.hidden = true; list.hidden = true;
+    renderOverdueChart(chartWrap, rows, rows, false);
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--ink-soft); padding:30px;">No overdue records.</td></tr>`;
+    return;
+  }
+
+  const counts = {};
+  OVERDUE_BANDS.forEach(b=> counts[b.id] = rows.filter(o=> overdueBand(o.daysLate).id===b.id).length);
+  toolbar.hidden = false;
+  toolbar.innerHTML = `
+    <div class="search-field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="overdue-search" type="search" placeholder="Search book or borrower" aria-label="Search book or borrower" autocomplete="off" value="${esc(S.q)}">
+    </div>
+    <div class="filter-chips" id="overdue-chips" role="group" aria-label="Filter by days late">
+      <button type="button" class="chip" data-band="all">All ${rows.length}</button>
+      ${OVERDUE_BANDS.map(b=>`<button type="button" class="chip" data-band="${b.id}">${b.short} · ${counts[b.id]}</button>`).join("")}
+    </div>
+    <div class="toolbar-spacer"></div>
+    <select class="sort-select" id="overdue-sort" aria-label="Sort overdue loans">
+      ${[["days","Days late"],["fine","Est. fine"],["due","Due date"],["title","Book title"],["borrower","Borrower"]].map(([v,l])=>`<option value="${v}"${S.sort===v ? " selected" : ""}>${l}</option>`).join("")}
+    </select>`;
+  foot.hidden = false;
+  foot.innerHTML = `<span id="overdue-count" role="status"></span>
+    <span class="od-pager"><button type="button" class="btn btn-secondary btn-sm" id="overdue-prev">Previous</button><button type="button" class="btn btn-secondary btn-sm" id="overdue-next">Next</button><span>${OVERDUE_PAGE_SIZE} per page</span></span>`;
+  list.hidden = false;
+
+  let first = true; // the bars animate in once per render, not on every keystroke
+  const draw = ()=>{
+    const shown = overdueFiltered(rows);
+    const pages = Math.max(1, Math.ceil(shown.length / OVERDUE_PAGE_SIZE));
+    S.page = Math.min(Math.max(1, S.page), pages);
+    const from = (S.page - 1) * OVERDUE_PAGE_SIZE, slice = shown.slice(from, from + OVERDUE_PAGE_SIZE);
+    $all(".chip", toolbar).forEach(c=>{
+      const on = c.dataset.band === S.band;
+      c.classList.toggle("active", on); c.setAttribute("aria-pressed", String(on));
+    });
+    renderOverdueChart(chartWrap, rows, shown, first); first = false;
+
+    const clearBtn = `<button type="button" class="btn btn-secondary btn-sm" data-od-clear>Clear filters</button>`;
+    tbody.innerHTML = slice.length ? slice.map(o=>{
+      const b = overdueBand(o.daysLate);
+      return `<tr><td><span class="od-pr ${b.cls}"><i></i>${b.name}</span></td><td class="cell-primary">${esc(o.bookTitle)}</td><td>${esc(o.userName || "—")}</td>
+        <td class="cell-mono">${fmtDate(o.dueDate)}</td><td class="od-num">${o.daysLate}</td><td class="od-num cell-mono">${peso(o.estimatedFine)}</td></tr>`;
+    }).join("") : `<tr><td colspan="6" style="text-align:center; color:var(--ink-soft); padding:30px;">No overdue loans match your search or filter.<div style="margin-top:10px;">${clearBtn}</div></td></tr>`;
+    list.innerHTML = slice.length ? slice.map(o=>{
+      const b = overdueBand(o.daysLate);
+      return `<div class="record-card"><div class="rc-top"><div><div class="rc-title">${esc(o.bookTitle)}</div><div class="rc-sub">${esc(o.userName || "—")}</div></div><span class="od-pr ${b.cls}"><i></i>${b.name}</span></div>
+        <div class="rc-meta"><span>Due <b>${fmtDate(o.dueDate)}</b></span><span><b>${o.daysLate}</b> days late</span><span>Est. fine <b>${peso(o.estimatedFine)}</b></span></div></div>`;
+    }).join("") : `<div class="empty-state"><div class="t">No matching loans</div><div class="s">No overdue loan matches your search or filter.</div><div style="margin-top:14px;">${clearBtn}</div></div>`;
+    [tbody, list].forEach(box=> $all("[data-od-clear]", box).forEach(btn=> btn.addEventListener("click", ()=>{
+      S.q = ""; S.band = "all"; S.page = 1; $("#overdue-search").value = ""; draw();
+    })));
+
+    const total = rows.length;
+    $("#overdue-count").textContent = !shown.length ? `No matching loans · ${total} overdue in total`
+      : shown.length < total ? `Showing ${from+1}–${from+slice.length} of ${shown.length} matching loans · ${total} overdue in total`
+      : `Showing ${from+1}–${from+slice.length} of ${total} overdue loans`;
+    $("#overdue-prev").disabled = S.page <= 1;
+    $("#overdue-next").disabled = S.page >= pages;
+  };
+
+  const search = $("#overdue-search"), sortSel = $("#overdue-sort");
+  search.addEventListener("input", debounce(()=>{ S.q = search.value; S.page = 1; draw(); }, 150));
+  sortSel.addEventListener("change", ()=>{ S.sort = sortSel.value; S.page = 1; draw(); });
+  $all(".chip", toolbar).forEach(c=> c.addEventListener("click", ()=>{ S.band = c.dataset.band; S.page = 1; draw(); }));
+  $("#overdue-prev").addEventListener("click", ()=>{ S.page--; draw(); });
+  $("#overdue-next").addEventListener("click", ()=>{ S.page++; draw(); });
+  draw();
+}
+
+const BORROWING_PAGE_SIZE = 10;
+let borrowingReportRequest = 0;
+const BORROWING_SORTS = [
+  ["newest","Newest First"],
+  ["oldest","Oldest First"],
+  ["title_az","Book Title (A–Z)"],
+  ["title_za","Book Title (Z–A)"],
+  ["borrower_az","Borrower Name (A–Z)"],
+  ["due_earliest","Due Date (Earliest First)"],
+  ["due_latest","Due Date (Latest First)"],
+];
+function borrowingLedgerQuery(){
+  const S = state.borrowing;
+  return "reports.php?ledger=1&" + new URLSearchParams({ q:S.q, sort:S.sort, page:String(S.page) }).toString();
+}
+function borrowingFineCell(t){
+  return t.status==="Returned" ? peso(t.fine) + (t.fine>0 && !t.finePaid ? " · unpaid" : "") : "—";
+}
+function paintBorrowingRows(tbody, list, rows, total){
+  const clearBtn = `<button type="button" class="btn btn-secondary btn-sm" data-br-clear>Clear search</button>`;
+  const emptyMsg = total ? "No borrowing records match your search." : "No transactions recorded yet.";
+  tbody.innerHTML = rows.length ? rows.map(t=>`
+    <tr><td><span class="badge ${badgeClassFor(t.status)}">${esc(t.status)}</span></td>
+    <td class="cell-primary">${esc(t.bookTitle)}</td><td>${esc(t.userName || "—")}</td>
+    <td class="cell-mono">${fmtDate(t.issueDate)}</td><td class="cell-mono">${fmtDate(t.dueDate)}</td>
+    <td class="cell-mono">${fmtDate(t.returnDate)}</td>
+    <td class="cell-mono">${borrowingFineCell(t)}</td></tr>`).join("")
+    : `<tr><td colspan="7" style="text-align:center; color:var(--ink-soft); padding:30px;">${emptyMsg}${state.borrowing.q ? `<div style="margin-top:10px;">${clearBtn}</div>` : ""}</td></tr>`;
+  list.innerHTML = rows.length ? rows.map(t=>`
+    <div class="record-card"><div class="rc-top"><div><div class="rc-title">${esc(t.bookTitle)}</div><div class="rc-sub">${esc(t.userName || "—")}</div></div><span class="badge ${badgeClassFor(t.status)}">${esc(t.status)}</span></div>
+      <div class="rc-meta"><span>Issued <b>${fmtDate(t.issueDate)}</b></span><span>Due <b>${fmtDate(t.dueDate)}</b></span><span>Returned <b>${fmtDate(t.returnDate)}</b></span><span>Fine <b>${borrowingFineCell(t)}</b></span></div></div>`).join("")
+    : `<div class="empty-state"><div class="t">${total ? "No matching records" : "No borrowing records"}</div><div class="s">${emptyMsg}</div>${state.borrowing.q ? `<div style="margin-top:14px;">${clearBtn}</div>` : ""}</div>`;
+}
+async function renderBorrowingReport(ctx){
+  const {tbody} = ctx;
+  const S = state.borrowing;
+  const toolbar = $("#overdue-toolbar"), foot = $("#overdue-foot"), list = $("#overdue-card-list");
+  toolbar.hidden = false;
+  toolbar.innerHTML = `
+    <div class="search-field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="borrowing-search" type="search" placeholder="Search book or borrower" aria-label="Search book or borrower" autocomplete="off" value="${esc(S.q)}">
+    </div>
+    <div class="toolbar-spacer"></div>
+    <select class="sort-select" id="borrowing-sort" aria-label="Sort borrowing records">
+      ${BORROWING_SORTS.map(([v,l])=>`<option value="${v}"${S.sort===v ? " selected" : ""}>${l}</option>`).join("")}
+    </select>`;
+  foot.hidden = false;
+  foot.innerHTML = `<span id="borrowing-count" role="status"></span>
+    <span class="od-pager"><button type="button" class="btn btn-secondary btn-sm" id="borrowing-prev">Previous</button><button type="button" class="btn btn-secondary btn-sm" id="borrowing-next">Next</button><span>${BORROWING_PAGE_SIZE} per page</span></span>`;
+  list.hidden = false;
+
+  const draw = async ()=>{
+    if(state.reportType !== "borrowing") return;
+    const requestId = ++borrowingReportRequest;
+    let data;
+    try {
+      data = await api(borrowingLedgerQuery());
+    } catch (err) {
+      if(requestId !== borrowingReportRequest || state.reportType !== "borrowing") return;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--ink-soft); padding:30px;">Could not load borrowing records: ${esc(err.message)}</td></tr>`;
+      list.innerHTML = "";
+      $("#borrowing-count").textContent = "Could not load records";
+      return;
+    }
+    if(requestId !== borrowingReportRequest || state.reportType !== "borrowing") return;
+    if(REPORT){
+      REPORT.recent = data.recent;
+      REPORT.recentTotal = data.recentTotal;
+      REPORT.recentPage = data.recentPage;
+    }
+    const total = data.recentTotal || 0;
+    const pages = Math.max(1, Math.ceil(total / BORROWING_PAGE_SIZE));
+    S.page = data.recentPage || Math.min(Math.max(1, S.page), pages);
+    const rows = data.recent || [];
+    const from = total ? (S.page - 1) * BORROWING_PAGE_SIZE : 0;
+    paintBorrowingRows(tbody, list, rows, total);
+    [tbody, list].forEach(box=> $all("[data-br-clear]", box).forEach(btn=> btn.addEventListener("click", ()=>{
+      S.q = ""; S.page = 1; const inp = $("#borrowing-search"); if(inp) inp.value = ""; draw();
+    })));
+    $("#borrowing-count").textContent = !total
+      ? (S.q ? "No matching borrowing records" : "No borrowing records")
+      : `Showing ${from+1}–${from+rows.length} of ${total} borrowing records`;
+    $("#borrowing-prev").disabled = S.page <= 1 || !total;
+    $("#borrowing-next").disabled = S.page >= pages || !total;
+  };
+
+  const search = $("#borrowing-search"), sortSel = $("#borrowing-sort");
+  search.addEventListener("input", debounce(()=>{ S.q = search.value; S.page = 1; draw(); }, 150));
+  sortSel.addEventListener("change", ()=>{ S.sort = sortSel.value; S.page = 1; draw(); });
+  $("#borrowing-prev").addEventListener("click", ()=>{ S.page--; draw(); });
+  $("#borrowing-next").addEventListener("click", ()=>{ S.page++; draw(); });
+  await draw();
+}
+
 async function renderReports(type, opts={}){
   type = type==="overdue" ? "overdue" : "borrowing";
   state.reportType = type;
+  if(type !== "borrowing") borrowingReportRequest++;
   const heading = $("#reports-heading"), sub = $("#reports-sub"), panelTitle = $("#reports-panel-title");
   const chartWrap = $("#reports-chart-wrap");
   const theadRow = $("#reports-thead-row"), tbody = $("#reports-tbody");
+  ["overdue-cards","overdue-toolbar","overdue-foot","overdue-card-list"].forEach(id=>{ const n = document.getElementById(id); if(n) n.hidden = true; });
+  chartWrap.setAttribute("aria-live", type==="overdue" ? "off" : "polite"); // the overdue chart redraws while filtering
   heading.textContent = type==="overdue" ? "Overdue Report" : "Borrowing Report";
-  panelTitle.textContent = type==="overdue" ? "Overdue loans by days late" : "Borrowing over the last 7 days";
+  panelTitle.textContent = type==="overdue" ? "Days late, most overdue first" : "Borrowing over the last 7 days";
   try{
     if(!opts.cached || !REPORT) await loadReport();
   }catch(err){
@@ -1931,40 +2618,17 @@ async function renderReports(type, opts={}){
 
   if(type==="overdue"){
     sub.textContent = `Every loan currently past its due date. Estimated fines use the saved library rules (rate and grace period). Estimated total: ${peso(r.totals.estimatedOverdueFines)}.`;
-    const rows = r.overdue;
-    const max = Math.max(1, ...rows.map(o=>o.daysLate));
-    chartWrap.innerHTML = rows.length ? `<div class="report-overdue-list">${rows.map(o=>`
-      <div class="report-overdue-item">
-        <div class="report-overdue-row">
-          <span class="report-overdue-title">${esc(o.bookTitle)}</span>
-          <span class="report-overdue-days" aria-label="${o.daysLate} days late">${o.daysLate}d</span>
-        </div>
-        <div class="report-overdue-track" role="progressbar" aria-label="${o.daysLate} days late" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${o.daysLate}">
-          <div class="report-overdue-fill" style="background:var(--oxblood);" data-w="${(o.daysLate/max*100).toFixed(0)}"></div>
-        </div>
-      </div>`).join("")}</div>`
-      : `<div class="empty-state" style="padding:40px;"><div class="s">Nothing overdue right now.</div></div>`;
-    requestAnimationFrame(()=> $all(".report-overdue-fill", chartWrap).forEach((el,i)=> gsap.to(el,{width:el.dataset.w+"%", duration:0.8, delay:0.05*i})));
-    theadRow.innerHTML = "<th>Book</th><th>Borrower</th><th>Due Date</th><th>Days Late</th><th>Est. Fine</th>";
-    tbody.innerHTML = rows.map(o=>`<tr><td class="cell-primary">${esc(o.bookTitle)}</td><td>${esc(o.userName || "—")}</td><td class="cell-mono">${fmtDate(o.dueDate)}</td>
-        <td><span class="badge badge-overdue">${o.daysLate}d</span></td><td class="cell-mono">${peso(o.estimatedFine)}</td></tr>`).join("")
-      || `<tr><td colspan="5" style="text-align:center; color:var(--ink-soft); padding:30px;">No overdue records.</td></tr>`;
+    renderOverdueReport(r, {chartWrap, theadRow, tbody});
   } else {
-    sub.textContent = `Issue and return activity. Fines assessed on returned loans to date: ${peso(r.totals.finesAssessed)}.`;
+    sub.textContent = `Issue and return activity. Fines assessed on returned loans to date: ${peso(r.totals.finesAssessed)}; still unpaid: ${peso(r.totals.finesUnpaid)}.`;
     renderActivityChart("reports-chart-wrap", r.activity);
-    theadRow.innerHTML = "<th>Status</th><th>Book</th><th>Person</th><th>Issued</th><th>Returned</th><th>Fine</th>";
-    tbody.innerHTML = r.recent.map(t=>`
-      <tr><td><span class="badge ${badgeClassFor(t.status)}">${esc(t.status)}</span></td>
-      <td class="cell-primary">${esc(t.bookTitle)}</td><td>${esc(t.userName || "—")}</td>
-      <td class="cell-mono">${fmtDate(t.issueDate)}</td>
-      <td class="cell-mono">${fmtDate(t.returnDate)}</td>
-      <td class="cell-mono">${t.status==="Returned" ? peso(t.fine) : "—"}</td></tr>`).join("")
-      || `<tr><td colspan="6" style="text-align:center; color:var(--ink-soft); padding:30px;">No transactions recorded yet.</td></tr>`;
+    theadRow.innerHTML = "<th scope='col'>Status</th><th scope='col'>Book</th><th scope='col'>Person</th><th scope='col'>Issued</th><th scope='col'>Due</th><th scope='col'>Returned</th><th scope='col'>Fine</th>";
+    await renderBorrowingReport({chartWrap, theadRow, tbody});
   }
 }
 
 /* ==================================================================
-   SETTINGS — frontend prototype (localStorage only, no backend)
+   SETTINGS — profile, library, notification, security and system preferences (saved via the API; theme is browser-local)
    ================================================================== */
 const AVATAR_PRESETS = ["#237A43","#154A28","#EBB134","#2F4A63","#7A2E2E","#3D6B4F"];
 let profileEditing = false;
@@ -1974,8 +2638,11 @@ function setFieldError(input, msg){
   const field = input.closest(".field");
   if(!field) return false;
   field.classList.add("invalid");
-  const err = field.querySelector(".err");
-  if(err) err.textContent = msg || "Please check this field.";
+  let err = field.querySelector(".err");
+  if(!err){ err = document.createElement("div"); err.className = "err"; field.appendChild(err); }
+  err.textContent = msg || "Please check this field.";
+  if(input.id){ err.id = err.id || input.id + "-err"; input.setAttribute("aria-describedby", err.id); }
+  input.setAttribute("aria-invalid","true");
   return false;
 }
 function clearFieldError(input){
@@ -1984,6 +2651,22 @@ function clearFieldError(input){
   field.classList.remove("invalid");
   const err = field.querySelector(".err");
   if(err) err.textContent = "";
+  input.removeAttribute("aria-invalid");
+  input.removeAttribute("aria-describedby");
+}
+const BOOK_FIELD_IDS = {title:"f-title", author:"f-author", category:"f-category", isbn:"f-isbn", year:"f-year", location:"f-location", format:"f-format", description:"f-description", cover:"f-cover"};
+const USER_FIELD_IDS = {lastName:"f-lastname", firstName:"f-firstname", middleInitial:"f-middleinitial", program:"f-program", yearLevel:"f-yearlevel", contact:"f-contact"};
+/* Show the server's per-field validation messages next to their inputs. Returns false if any
+   field can't be mapped, so the caller falls back to a toast. */
+function showServerFieldErrors(modalEl, err, idMap){
+  if(!err || !err.fields) return false;
+  const keys = Object.keys(err.fields);
+  const els = keys.map(k=> idMap[k] && $("#"+idMap[k], modalEl));
+  if(!keys.length || els.some(el=>!el)) return false;
+  keys.forEach((k,i)=> setFieldError(els[i], String(err.fields[k])));
+  els[0].focus();
+  shakeModal(modalEl);
+  return true;
 }
 function markSaving(btn, on){
   if(!btn) return;
@@ -2000,7 +2683,7 @@ function paintAvatarEl(el){
   const initials = initialsOf(ACCOUNT.displayName || "AL") || "AL";
   if(ACCOUNT.avatarDataUrl){
     el.classList.add("has-photo");
-    el.style.backgroundImage = `url(${ACCOUNT.avatarDataUrl})`;
+    el.style.backgroundImage = `url("${ACCOUNT.avatarDataUrl}")`;
     el.style.backgroundColor = "";
     el.textContent = "";
   } else {
@@ -2037,6 +2720,7 @@ function showSettingsPane(id){
   $all(".settings-nav-item").forEach(b=>{
     const on = b.dataset.settings === paneId;
     b.classList.toggle("active", on);
+    if(on) b.setAttribute("aria-current","true"); else b.removeAttribute("aria-current");
   });
   $all(".settings-pane").forEach(p=>{
     p.classList.toggle("active", p.id === "settings-pane-" + paneId);
@@ -2071,7 +2755,7 @@ function setProfileEditing(on){
       username: ACCOUNT.username,
       email: ACCOUNT.email,
     };
-    setTimeout(()=> $("#profile-name").focus(), 50);
+    $("#profile-name").focus();
   }
 }
 
@@ -2365,7 +3049,11 @@ $("#sec-change-pass").addEventListener("click", ()=>{
     if($("#pw-meter-bar")) $("#pw-meter-bar").style.width = "0";
     showToast("Password updated successfully.");
   }).catch(err=>{
-    showToast(err.message, {kind:"error"});
+    const f = err.fields || {};
+    if(f.currentPassword) setFieldError(cur, f.currentPassword);
+    if(f.newPassword) setFieldError(nw, f.newPassword);
+    if(f.confirmPassword) setFieldError(cf, f.confirmPassword);
+    showToast(Object.keys(f).length ? "Please check the highlighted fields." : err.message, {kind:"error"});
   }).finally(()=>{
     markSaving(btn, false);
   });
@@ -2433,11 +3121,11 @@ $("#settings-reset-btn").addEventListener("click", ()=>{
 $("#global-search").addEventListener("keydown", e=>{
   if(e.key==="Enter"){
     const q = e.target.value;
+    state.books.search = q;
     state.books.category = "all";
     state.books.filters = emptyFilters();
     if(q.trim()) pushRecentSearch(q);
-    goToView("books", {force:true});
-    setTimeout(()=>{ $("#books-search").value = q; state.books.search = q; toggleSearchClear(); renderBooks(); }, 420);
+    goToView("books", {force:true, after:()=>{ $("#books-search").value = q; toggleSearchClear(); }});
   }
 });
 
@@ -2451,18 +3139,23 @@ function splitToChars(el){
 }
 
 function playLoadingSequence(){
+  if(reducedMotionQuery.matches){
+    $("#loading-screen").style.display = "none";
+    revealApp();
+    return;
+  }
   const line1 = splitToChars($("#loader-line-1 span"));
   const line2 = splitToChars($("#loader-line-2 span"));
   gsap.set([line1, line2], {opacity:0, y:26});
 
   const tl = gsap.timeline();
-  tl.to(line1, {opacity:1, y:0, duration:0.5, stagger:0.028, ease:"power3.out"})
-    .to(line2, {opacity:1, y:0, duration:0.5, stagger:0.022, ease:"power3.out"}, "-=0.32")
-    .to("#loader-rule", {scaleX:1, duration:0.5, ease:"power2.out"}, "-=0.15")
-    .to("#loader-sub", {opacity:1, duration:0.4}, "-=0.2")
-    .to("#loading-screen", {duration:0.35}) // brief hold
+  tl.to(line1, {opacity:1, y:0, duration:0.35, stagger:0.015, ease:"power3.out"})
+    .to(line2, {opacity:1, y:0, duration:0.35, stagger:0.012, ease:"power3.out"}, "-=0.25")
+    .to("#loader-rule", {scaleX:1, duration:0.3, ease:"power2.out"}, "-=0.15")
+    .to("#loader-sub", {opacity:1, duration:0.3}, "-=0.2")
+    .to("#loading-screen", {duration:0.1}) // brief hold
     .to("#loading-screen", {
-      opacity:0, duration:0.55, ease:"power2.inOut",
+      opacity:0, duration:0.35, ease:"power2.inOut",
       onComplete:()=>{ document.getElementById("loading-screen").style.display = "none"; }
     })
     .call(revealApp, [], "-=0.2");
@@ -2489,17 +3182,21 @@ function revealApp(){
   tl.call(()=>{
     renderDashboard();
     const start = CONFIG.landingPage || "dashboard";
-    if(start !== "dashboard") goToView(start, {force:true});
+    if(start !== "dashboard") goToView(start, {force:true, silent:true});
   });
   wireMagnetic(document);
 }
 
 /* Keyboard: '/' focuses global search when not typing elsewhere */
 document.addEventListener("keydown", e=>{
-  if(e.key==="/" && document.activeElement.tagName!=="INPUT" && document.activeElement.tagName!=="TEXTAREA"){
-    e.preventDefault();
-    $("#global-search").focus();
-  }
+  if(e.key!=="/" || e.ctrlKey || e.metaKey || e.altKey || scrollLockCount>0) return;
+  const a = document.activeElement, tag = a ? a.tagName : "";
+  if(tag==="INPUT" || tag==="TEXTAREA" || tag==="SELECT" || (a && a.isContentEditable)) return;
+  if(getComputedStyle($("#app")).visibility === "hidden") return; // sign-in screen
+  e.preventDefault();
+  const field = $("#global-search");
+  if(!field.offsetParent) $("#search-toggle-btn")?.click(); // narrow screens: reveal the field first
+  else field.focus();
 });
 
 /* Boot */
@@ -2507,6 +3204,7 @@ function showLoginScreen(message=""){
   $("#loading-screen").style.display = "none";
   $("#app").style.visibility = "hidden";
   $("#login-screen").hidden = false;
+  $("#login-username")?.focus();
   const error = $("#login-error");
   error.textContent = message;
   error.hidden = !message;

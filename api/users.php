@@ -37,9 +37,10 @@ function fetchUsersPayload(PDO $pdo, $id = null, $status = null, $search = null,
     $stmt->execute($exec);
     $rows = $stmt->fetchAll();
     $borrowed = borrowedIdsByUser($pdo, array_column($rows, 'id'));
+    $holds = patronHolds($pdo, array_column($rows, 'id'), todayManila());
     $users = [];
     foreach ($rows as $row) {
-        $users[] = mapUser($row, $borrowed[$row['id']] ?? []);
+        $users[] = mapUser($row, $borrowed[$row['id']] ?? [], $holds[$row['id']] ?? []);
     }
     return $users;
 }
@@ -116,6 +117,7 @@ function updateUser(PDO $pdo, string $id, array $data): void {
 
     $params[] = $id;
     $pdo->prepare('UPDATE users SET ' . implode(', ', $fields) . ' WHERE id = ? AND deleted_at IS NULL')->execute($params);
+    auditLogQuiet($pdo, 'user.update', 'user', $id, ['fields' => auditFieldNames($fields)]);
     $total = 0;
     $users = fetchUsersPayload($pdo, $id, null, null, 1, 0, $total);
     sendResponse(['message' => 'User updated successfully', 'user' => $users[0]]);
@@ -142,7 +144,7 @@ if ($method === 'GET') {
 }
 
 if ($method === 'PUT') {
-    requireLibrarian();
+    requireStaff($actor);
     $data = getJsonBody();
     $id = getQueryParam('id') ?: ($data['id'] ?? null);
     if (!$id) {
@@ -152,7 +154,7 @@ if ($method === 'PUT') {
 }
 
 if ($method === 'POST') {
-    requireLibrarian();
+    requireStaff($actor);
     $data = getJsonBody();
     $errors = [];
     $lastName = validateStringLength($data['lastName'] ?? $data['last_name'] ?? '', 1, 100, 'lastName', $errors);
@@ -200,6 +202,7 @@ if ($method === 'POST') {
             $contact,
             $status,
         ]);
+        auditLog($pdo, 'user.create', 'user', $newId, ['name' => formatUserName($lastName, $firstName, $middleInitial)]);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
@@ -218,20 +221,41 @@ if ($method === 'POST') {
 }
 
 if ($method === 'DELETE') {
-    requireLibrarian();
+    requireStaff($actor);
     $id = getQueryParam('id');
     if (!$id) {
         sendError('User ID is required', 400);
     }
-    if (!userExists($pdo, (string)$id)) {
-        sendError('User not found', 404);
+    // Lock the patron row first: an issue to this patron must wait, then sees the patron as deleted.
+    $pdo->beginTransaction();
+    try {
+        $lock = $pdo->prepare('SELECT last_name, first_name, middle_initial FROM users WHERE id = ? AND deleted_at IS NULL FOR UPDATE');
+        $lock->execute([(string)$id]);
+        $target = $lock->fetch();
+        if (!$target) {
+            $pdo->rollBack();
+            sendError('User not found', 404);
+        }
+        $loan = $pdo->prepare("SELECT COUNT(*) FROM books WHERE borrowed_by = ? AND status IN ('Borrowed','Overdue') AND deleted_at IS NULL");
+        $loan->execute([$id]);
+        if ((int)$loan->fetchColumn() > 0) {
+            $pdo->rollBack();
+            sendError("Can't remove a patron with active loans", 400);
+        }
+        $pdo->prepare('UPDATE users SET deleted_at = NOW() WHERE id = ?')->execute([$id]);
+        $cancel = $pdo->prepare("UPDATE reservations SET status = 'cancelled' WHERE user_id = ? AND status = 'active'");
+        $cancel->execute([$id]);
+        auditLog($pdo, 'user.delete', 'user', (string)$id, ['name' => formatUserName($target['last_name'], $target['first_name'], $target['middle_initial'] ?? ''), 'cancelledReservations' => $cancel->rowCount()]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($e instanceof PDOException && in_array((int)($e->errorInfo[1] ?? 0), [1205, 1213], true)) {
+            sendError('That record is busy. Please try again.', 409);
+        }
+        throw $e;
     }
-    $loan = $pdo->prepare("SELECT COUNT(*) FROM books WHERE borrowed_by = ? AND status IN ('Borrowed','Overdue') AND deleted_at IS NULL");
-    $loan->execute([$id]);
-    if ((int)$loan->fetchColumn() > 0) {
-        sendError("Can't remove a patron with active loans", 400);
-    }
-    $pdo->prepare('UPDATE users SET deleted_at = NOW() WHERE id = ?')->execute([$id]);
     sendResponse(['message' => 'User deleted successfully']);
 }
 

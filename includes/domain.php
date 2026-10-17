@@ -121,7 +121,7 @@ function mapBook(array $row): array {
     ];
 }
 
-function mapUser(array $row, array $borrowedBookIds = []): array {
+function mapUser(array $row, array $borrowedBookIds = [], array $holds = []): array {
     return [
         'id' => $row['id'],
         'lastName' => $row['last_name'],
@@ -133,6 +133,8 @@ function mapUser(array $row, array $borrowedBookIds = []): array {
         'contact' => $row['contact'],
         'status' => $row['status'],
         'borrowedBookIds' => array_values($borrowedBookIds),
+        'unpaidFines' => (float)($holds['unpaidFines'] ?? 0),
+        'overdueLoans' => (int)($holds['overdueLoans'] ?? 0),
     ];
 }
 
@@ -149,6 +151,7 @@ function mapTransaction(array $row): array {
         'dueDate' => $row['due_date'],
         'returnDate' => $row['return_date'],
         'fine' => (float)$row['fine'],
+        'finePaid' => (float)$row['fine'] <= 0 || !empty($row['fine_paid_at']),
         'status' => $status,
         'renewalCount' => isset($row['renewal_count']) ? (int)$row['renewal_count'] : 0,
         'createdAt' => $row['created_at'] ?? null,
@@ -235,4 +238,103 @@ function countRows(PDO $pdo, string $sql, array $params): int {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     return (int)$stmt->fetchColumn();
+}
+
+/* ---------- Audit trail ---------- */
+
+/** [actor id, actor name] of the signed-in staff member; [null, null] for anonymous events. */
+function auditActor(): array {
+    $u = function_exists('currentUser') ? currentUser() : null;
+    return $u ? [(int)$u['id'], (string)(($u['displayName'] ?? '') ?: ($u['username'] ?? ''))] : [null, null];
+}
+
+/** Column names (without backticks / "= ?") from an UPDATE ... SET fragment list. */
+function auditFieldNames(array $fields): array {
+    return array_map(static fn($f) => trim(explode(' = ', (string)$f)[0], '` '), $fields);
+}
+
+/** [key => [old, new]] for every key whose value differs. */
+function auditDiff(array $before, array $after): array {
+    $out = [];
+    foreach ($after as $k => $v) {
+        if (($before[$k] ?? null) !== $v) {
+            $out[$k] = [$before[$k] ?? null, $v];
+        }
+    }
+    return $out;
+}
+
+/**
+ * Records one audit entry. STRICT: throws on failure, so call it inside the same transaction as the
+ * action it describes (a failed log write then rolls the action back). Never put passwords, tokens
+ * or avatar data in $details.
+ */
+function auditLog(PDO $pdo, string $action, ?string $entityType = null, ?string $entityId = null, array $details = [], ?array $actor = null): void {
+    [$actorId, $actorName] = $actor ?? auditActor();
+    $json = $details ? json_encode($details, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR) : null;
+    if ($json !== null && strlen($json) > 2000) {
+        $json = mb_strcut($json, 0, 1997, 'UTF-8') . '...';
+    }
+    $ip = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
+    $pdo->prepare('INSERT INTO audit_log (actor_id, actor_name, action, entity_type, entity_id, details, ip) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        ->execute([$actorId, $actorName, $action, $entityType, $entityId, $json, $ip === '' ? null : $ip]);
+}
+
+/** Same as auditLog() but never throws: for single-statement actions outside a transaction. */
+function auditLogQuiet(PDO $pdo, string $action, ?string $entityType = null, ?string $entityId = null, array $details = [], ?array $actor = null): void {
+    try {
+        auditLog($pdo, $action, $entityType, $entityId, $details, $actor);
+    } catch (Throwable $e) {
+        error_log('[feu-library] audit log write failed: ' . $e->getMessage());
+    }
+}
+
+/* ---------- Circulation policy ---------- */
+
+/** [patronId => ['unpaidFines' => float, 'overdueLoans' => int]] for the given patrons. */
+function patronHolds(PDO $pdo, array $userIds, string $today): array {
+    $out = [];
+    foreach ($userIds as $id) {
+        $out[$id] = ['unpaidFines' => 0.0, 'overdueLoans' => 0];
+    }
+    if (!$userIds) {
+        return $out;
+    }
+    $in = implode(',', array_fill(0, count($userIds), '?'));
+    $stmt = $pdo->prepare("
+        SELECT user_id,
+          COALESCE(SUM(CASE WHEN status = 'Returned' AND fine > 0 AND fine_paid_at IS NULL THEN fine END), 0) AS unpaid,
+          COALESCE(SUM(CASE WHEN return_date IS NULL AND status IN ('Borrowed','Overdue') AND due_date IS NOT NULL AND due_date < ? THEN 1 ELSE 0 END), 0) AS overdue
+        FROM transactions WHERE type = 'issue' AND user_id IN ($in) GROUP BY user_id
+    ");
+    $stmt->execute(array_merge([$today], array_values($userIds)));
+    foreach ($stmt->fetchAll() as $r) {
+        $out[$r['user_id']] = ['unpaidFines' => round((float)$r['unpaid'], 2), 'overdueLoans' => (int)$r['overdue']];
+    }
+    return $out;
+}
+
+/** Why this patron may not borrow right now (overdue books, then unpaid fines), or null if they may. */
+function patronBlockReason(PDO $pdo, string $userId, string $today): ?string {
+    $h = patronHolds($pdo, [$userId], $today)[$userId];
+    if ($h['overdueLoans'] > 0) {
+        $n = $h['overdueLoans'];
+        return "This patron has {$n} overdue book" . ($n === 1 ? '' : 's') . '. Return ' . ($n === 1 ? 'it' : 'them') . ' before borrowing more.';
+    }
+    if ($h['unpaidFines'] > 0) {
+        return 'This patron has unpaid fines of ₱' . number_format($h['unpaidFines'], 2) . '. Record the payment before borrowing.';
+    }
+    return null;
+}
+
+/** First active reservation on the book from an eligible patron, or null. */
+function firstReservationHolder(PDO $pdo, string $bookId): ?string {
+    $stmt = $pdo->prepare("
+        SELECT r.user_id FROM reservations r
+        JOIN users u ON u.id = r.user_id AND u.deleted_at IS NULL AND u.status = 'Active'
+        WHERE r.book_id = ? AND r.status = 'active' ORDER BY r.created_at, r.id LIMIT 1
+    ");
+    $stmt->execute([$bookId]);
+    $v = $stmt->fetchColumn();
+    return $v === false ? null : (string)$v;
 }

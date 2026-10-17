@@ -59,8 +59,13 @@ if ($method === 'PUT' || $method === 'POST') {
         sendError('No fields to update', 400);
     }
     $params[] = 1;
+    $before = loadNotifs($pdo);
     $pdo->prepare('UPDATE notif_prefs SET ' . implode(', ', $fields) . ' WHERE id = ?')->execute($params);
     $prefs = loadNotifs($pdo);
+    $diff = auditDiff($before, $prefs);
+    if ($diff) {
+        auditLogQuiet($pdo, 'notifs.update', 'settings', 'notifications', ['changes' => $diff]);
+    }
     sendResponse([
         'message' => 'Notification preferences updated',
         'notifPrefs' => $prefs,

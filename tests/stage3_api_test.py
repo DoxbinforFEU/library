@@ -18,6 +18,7 @@ def call(path, method="GET", body=None):
     except urllib.error.HTTPError as e:
         try: return e.code, json.loads(e.read() or b"{}")
         except Exception: return e.code, {}
+# Manila (UTC+8) calendar date, matching the app; the mysql CLI session itself runs in server time.
 def sql(q): return subprocess.run(["mysql","-N","-B","feu_library","-e",q],capture_output=True,text=True).stdout.strip()
 
 check("login", call("auth.php","POST",{"action":"login","username":"admin","password":PW})[0]==200)
@@ -25,13 +26,34 @@ s, r = call("reports.php"); check("reports 200", s==200, s)
 c, t = r["collection"], r["totals"]
 check("titles matches DB", c["titles"]==int(sql("select count(*) from books where deleted_at is null")), c)
 check("available matches DB", c["available"]==int(sql("select count(*) from books where deleted_at is null and status='Available'")), c)
-check("overdue matches DB", c["overdue"]==int(sql("select count(*) from books where deleted_at is null and status in ('Borrowed','Overdue') and due_date<curdate()")), c)
+check("overdue matches DB", c["overdue"]==int(sql("select count(*) from books where deleted_at is null and status in ('Borrowed','Overdue') and due_date<date(utc_timestamp() + interval 8 hour)")), c)
 check("available+onLoan+overdue == titles", c["available"]+c["onLoan"]+c["overdue"]==c["titles"], c)
 check("active patrons matches DB", c["activePatrons"]==int(sql("select count(*) from users where deleted_at is null and status='Active'")), c)
-check("dueTodayCount matches DB", t["dueTodayCount"]==int(sql("select count(*) from transactions where type='issue' and return_date is null and status in ('Borrowed','Overdue') and due_date=curdate()")), t)
+check("dueTodayCount matches DB", t["dueTodayCount"]==int(sql("select count(*) from transactions where type='issue' and return_date is null and status in ('Borrowed','Overdue') and due_date=date(utc_timestamp() + interval 8 hour)")), t)
 check("overdue list size == totals.overdueCount", len(r["overdue"])==t["overdueCount"])
 check("activity has 7 days", len(r["activity"])==7)
-check("issued in activity == DB (today)", r["activity"][-1]["issued"]==int(sql("select count(*) from transactions where type='issue' and issue_date=curdate()")))
+check("issued in activity == DB (today)", r["activity"][-1]["issued"]==int(sql("select count(*) from transactions where type='issue' and issue_date=date(utc_timestamp() + interval 8 hour)")))
+check("full report recent page size is 10", r.get("recentPageSize")==10 and len(r.get("recent") or [])<=10, (r.get("recentPageSize"), len(r.get("recent") or [])))
+s, led = call("reports.php?ledger=1&sort=newest&page=1")
+check("ledger 200", s==200, s)
+check("ledger page size is 10", led.get("recentPageSize")==10 and len(led.get("recent") or [])<=10, led)
+check("ledger total is int", isinstance(led.get("recentTotal"), int), led)
+s, bad = call("reports.php?ledger=1&sort=issue_date%20DESC&page=1")
+check("invalid sort falls back to newest", s==200 and bad.get("recentSort")=="newest", bad.get("recentSort"))
+s, az = call("reports.php?ledger=1&sort=title_az&page=1")
+az_titles = [x.get("bookTitle") or "" for x in (az.get("recent") or [])]
+check("title_az is nondecreasing on the page", all(az_titles[i].lower()<=az_titles[i+1].lower() for i in range(len(az_titles)-1)), az_titles)
+s, nw = call("reports.php?ledger=1&sort=newest&page=1")
+nw_dates = [x.get("issueDate") or "" for x in (nw.get("recent") or [])]
+check("newest first is nonincreasing by issue date", all(nw_dates[i]>=nw_dates[i+1] for i in range(len(nw_dates)-1)), nw_dates)
+if (led.get("recentTotal") or 0) > 10:
+    s, p2 = call("reports.php?ledger=1&sort=newest&page=2")
+    ids1 = [x.get("id") for x in (nw.get("recent") or [])]
+    ids2 = [x.get("id") for x in (p2.get("recent") or [])]
+    check("page 2 has no overlap with page 1", s==200 and ids2 and not set(ids1)&set(ids2), (ids1, ids2))
+    check("page 2 length <= 10", len(ids2)<=10, len(ids2))
+s, miss = call("reports.php?ledger=1&q=__no_such_borrowing_record__&sort=newest&page=1")
+check("empty search is empty page", s==200 and miss.get("recentTotal")==0 and miss.get("recent")==[], miss)
 s, b = call("books.php?limit=200"); check("books list has borrowCount", s==200 and all("borrowCount" in x for x in b["books"]))
 if b["books"]:
     x = b["books"][0]; check("borrowCount matches DB", x["borrowCount"]==int(sql(f"select count(*) from transactions where type='issue' and book_id='{x['id']}'")), x)

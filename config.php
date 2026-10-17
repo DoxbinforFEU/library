@@ -6,7 +6,9 @@ require_once __DIR__ . '/includes/migrations.php';
 // `php tools/migrate.php --yes` after a backup.
 if (!migrationsApplied($pdo)) {
     error_log('[feu-library] database migrations are pending; run tools/migrate.php');
-    sendError('Database setup is incomplete. An administrator must run: php tools/migrate.php --yes', 503);
+    sendError($IS_DEVELOPMENT
+        ? 'Database setup is incomplete. An administrator must run: php tools/migrate.php --yes'
+        : 'Service temporarily unavailable.', 503);
 }
 if ($IS_DEVELOPMENT) {
     ensureDevSeeds($pdo);

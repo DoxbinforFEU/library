@@ -1,5 +1,9 @@
 # FEU Roosevelt Library Audit
 
+> **Update, October 2026.** This is the original recovery-era audit. Several statements below are now historical
+> (login throttling, CSRF origin checks and automated tests exist; migrations replaced the request-time schema guard).
+> The current security status and the fixes made are in the section **"October 2026 security audit: status"** at the end.
+
 **Status:** The database was recovered to a separate XAMPP data directory and the application login was verified. The original data directory remains preserved.
 
 ## Critical issues
@@ -20,10 +24,10 @@ None confirmed.
 
 | Finding | Status / recommendation |
 |---|---|
-| No CSRF token or login-attempt throttling is implemented. Session cookies use `HttpOnly` and `SameSite=Lax`, and the API does not enable cross-origin access by default, but these controls should be strengthened before public deployment. |
+| *(Partly resolved, see the October 2026 section: login throttling and an Origin check now exist; there is still no CSRF token.)* No CSRF token or login-attempt throttling is implemented. Session cookies use `HttpOnly` and `SameSite=Lax`, and the API does not enable cross-origin access by default, but these controls should be strengthened before public deployment. |
 | `schema.sql` applies foreign-key constraints with `ALTER TABLE ... ADD CONSTRAINT`; those statements are not safe to rerun when constraints already exist. | README now warns against re-importing over a database with records. Use a reviewed, backed-up migration for schema changes. |
 | The first-staff setup endpoint checks the staff count before inserting without serializing concurrent setup requests. | Add a database lock/transaction if first-run setup will be exposed beyond local development. |
-| There is no automated test suite. | The `tests` directory is empty; manual smoke checks and database integration tests remain to be added. |
+| *(Resolved: `tests/` now holds automated suites, see README.)* There is no automated test suite. | The `tests` directory is empty; manual smoke checks and database integration tests remain to be added. |
 | The schema does not declare ISBN uniqueness. | Verify existing duplicate ISBN values and the application's ISBN rules against the live database before considering a unique index. No data or schema change was made. |
 
 ## Low-priority observations
@@ -88,3 +92,31 @@ None confirmed.
 2. Use the XAMPP Control Panel to manage MySQL; its `my.ini` now targets `data_rebuilt`. If startup fails, stop and inspect the new error log before changing or replacing any InnoDB files.
 3. Complete the manual CRUD/report/logout/password-change smoke tests in the README.
 4. Before publishing, set `APP_ENV=production`, configure a dedicated database user and secret storage, remove the development seed password from the local environment, and add automated API/database tests.
+
+## October 2026 security audit: status
+
+A read-only static review (39 documents) produced 32 findings: 0 critical, 1 high, 8 medium, 15 low, 8 informational.
+Remediation is tracked in phases. "Verified" means covered by an automated test that passes in a sandbox
+(PHP 8.3, MariaDB 10.11, Apache 2.4); nothing has been verified on XAMPP's Windows stack or in a real browser unless stated.
+
+| ID | Finding | Status |
+|---|---|---|
+| F-01 | Unauthenticated first-run admin creation | **Fixed.** Web setup needs `SETUP_TOKEN`; `tools/create_admin.php` is the normal route; `setupRequired` no longer exposed. Verified. |
+| F-02 | Sessions survive password change; no absolute lifetime | **Fixed.** Sessions carry a password fingerprint; 12 h absolute cap. Verified. |
+| F-03 | Secrets/dumps in the project folder | **Owner action.** Rotate `DEV_ADMIN_PASSWORD`, move SQL dumps out of the web root. |
+| F-04 | Web-server hardening fails open | **Fixed.** Per-folder `Require all denied`, `.git` blocked, `tests/web_exposure_check.py`. Verified on Apache 2.4. |
+| F-05 | No HTTPS enforcement / HSTS; forwarded-proto trusted blindly | **Fixed.** HTTPS required in production, HSTS, `TRUSTED_PROXIES`. Verified. |
+| F-06 | No Content-Security-Policy | **Fixed in code, enforce after a browser check** (Phase 5A). Inline script and inline handler removed, strict `script-src 'self'` policy added to `.htaccess` in **report-only** mode; `tests/static_check.py` guards against regressions. Not yet observed in a real browser. |
+| F-07 | No audit trail | **Fixed.** `audit_log` (migration 006), written in the same transaction as the action. Verified. |
+| F-08 | Circulation policy gaps | **Fixed.** Overdue and unpaid-fine blocks, fine payments (migration 007), reservations honoured. Verified. |
+| F-09 | UI inert after session expiry with a dialog open | **Fixed.** Verified in jsdom. |
+| Password quality | Length-only password policy | **Improved** (Phase 5A): common/guessable passwords, look-alikes (p@ssw0rd), digits-only, repeats and passwords containing the username/email are rejected. Two-factor login is **not** done. |
+| L-01 to L-05 | Type confusion 500s, length mismatches, unbounded settings, duplicate-key races, delete races | **Fixed.** Verified, including 40 concurrent race runs. |
+| L-08 | Pre-login information disclosure | **Fixed** (generic messages in production). |
+| L-11 | Third-party fonts and images | **Partly fixed** (Phase 5A): fonts are self-hosted (`fonts/`). The six Unsplash photos on the home page and staff-entered cover URLs still load from other sites. |
+| L-14 | Stale documentation | **Fixed** (README, this file, progress log, `.env.example`). |
+| R3 | Book/loan duplication drift | **Mitigated:** `tools/check_integrity.php`. |
+| R4 | Redundant indexes | **Fixed** (migration 008). |
+| R5-R7 | Defaults/categories/landing pages duplicated in PHP, JS, HTML | **Guarded:** `tests/static_check.py` fails if they diverge. |
+| Performance (audit section) | Session file lock serialized parallel requests; 14 report queries; full catalog reloaded after every change; two auth lookups per write; ~500 KB avatar kept in the session; unbounded reservations list; search re-rendered on every keystroke | **Fixed** (Phase 4, no migration). Still open: server-side search/pagination for very large catalogs. |
+| L-06, L-07, L-09 to L-13, L-15, R1, R2, R8-R12, R15 | See `IMPLEMENTATION_PROGRESS.md` ("Deliberately not changed") | **Open or deferred by decision.** |

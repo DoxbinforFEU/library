@@ -10,19 +10,67 @@ if ($method !== 'GET') {
 $settings = loadSettingsRow($pdo);
 $today = todayManila();
 
+$borrowSortKey = (string)getQueryParam('sort', 'newest');
+$borrowSortSql = [
+    'newest' => 'issue_date DESC, created_at DESC, id DESC',
+    'oldest' => 'issue_date ASC, created_at ASC, id ASC',
+    'title_az' => 'book_title ASC, issue_date DESC, id DESC',
+    'title_za' => 'book_title DESC, issue_date DESC, id DESC',
+    'borrower_az' => 'user_name ASC, issue_date DESC, id DESC',
+    'due_earliest' => 'CASE WHEN due_date IS NULL THEN 1 ELSE 0 END ASC, due_date ASC, issue_date DESC, id DESC',
+    'due_latest' => 'CASE WHEN due_date IS NULL THEN 1 ELSE 0 END ASC, due_date DESC, issue_date DESC, id DESC',
+];
+if (!isset($borrowSortSql[$borrowSortKey])) {
+    $borrowSortKey = 'newest';
+}
+$borrowPageSize = 10;
+$borrowPage = max(1, (int)getQueryParam('page', 1));
+$borrowWhere = "type = 'issue'";
+$borrowParams = [];
+$borrowSearch = likeTerm(getQueryParam('q'));
+if ($borrowSearch !== null) {
+    $borrowWhere .= " AND (book_title LIKE ? ESCAPE '\\\\' OR user_name LIKE ? ESCAPE '\\\\')";
+    $borrowParams[] = $borrowSearch;
+    $borrowParams[] = $borrowSearch;
+}
+$recentTotal = countRows($pdo, "SELECT COUNT(*) FROM transactions WHERE $borrowWhere", $borrowParams);
+$borrowPages = max(1, (int)ceil($recentTotal / $borrowPageSize));
+if ($borrowPage > $borrowPages) {
+    $borrowPage = $borrowPages;
+}
+$borrowOffset = ($borrowPage - 1) * $borrowPageSize;
+$recentStmt = $pdo->prepare("SELECT * FROM transactions WHERE $borrowWhere ORDER BY {$borrowSortSql[$borrowSortKey]} LIMIT $borrowPageSize OFFSET $borrowOffset");
+$recentStmt->execute($borrowParams);
+$recent = array_map('mapTransaction', $recentStmt->fetchAll());
+$ledger = [
+    'recent' => $recent,
+    'recentTotal' => $recentTotal,
+    'recentPage' => $borrowPage,
+    'recentPageSize' => $borrowPageSize,
+    'recentSort' => $borrowSortKey,
+];
+if ((string)getQueryParam('ledger', '') === '1') {
+    sendResponse($ledger);
+}
+
+// Last 7 days: one grouped query per column (was 14 single-day queries).
+$firstDay = addDaysIso($today, -6);
+$issuedByDay = $pdo->prepare("SELECT issue_date AS d, COUNT(*) AS n FROM transactions
+    WHERE type = 'issue' AND issue_date BETWEEN ? AND ? GROUP BY issue_date");
+$issuedByDay->execute([$firstDay, $today]);
+$issuedByDay = array_column($issuedByDay->fetchAll(), 'n', 'd');
+$returnedByDay = $pdo->prepare("SELECT return_date AS d, COUNT(*) AS n FROM transactions
+    WHERE type = 'issue' AND status = 'Returned' AND return_date BETWEEN ? AND ? GROUP BY return_date");
+$returnedByDay->execute([$firstDay, $today]);
+$returnedByDay = array_column($returnedByDay->fetchAll(), 'n', 'd');
 $activity = [];
 for ($i = 6; $i >= 0; $i--) {
-    $day = (new DateTimeImmutable($today, new DateTimeZone(APP_TIMEZONE)))->modify("-{$i} days")->format('Y-m-d');
-    $issued = $pdo->prepare("SELECT COUNT(*) FROM transactions WHERE type = 'issue' AND issue_date = ?");
-    $issued->execute([$day]);
-    $returned = $pdo->prepare("SELECT COUNT(*) FROM transactions WHERE type = 'issue' AND status = 'Returned' AND return_date = ?");
-    $returned->execute([$day]);
-    $label = (new DateTimeImmutable($day, new DateTimeZone(APP_TIMEZONE)))->format('D');
+    $day = addDaysIso($today, -$i);
     $activity[] = [
         'date' => $day,
-        'label' => $label,
-        'issued' => (int)$issued->fetchColumn(),
-        'returned' => (int)$returned->fetchColumn(),
+        'label' => (new DateTimeImmutable($day, new DateTimeZone(APP_TIMEZONE)))->format('D'),
+        'issued' => (int)($issuedByDay[$day] ?? 0),
+        'returned' => (int)($returnedByDay[$day] ?? 0),
     ];
 }
 
@@ -64,6 +112,12 @@ $finesAssessed = (float)$pdo->query("
     WHERE type = 'issue' AND status = 'Returned'
 ")->fetchColumn();
 
+$finesUnpaid = (float)$pdo->query("
+    SELECT COALESCE(SUM(fine), 0)
+    FROM transactions
+    WHERE type = 'issue' AND status = 'Returned' AND fine > 0 AND fine_paid_at IS NULL
+")->fetchColumn();
+
 $collectionRow = $pdo->prepare("
     SELECT COUNT(*) AS titles,
       COALESCE(SUM(status = 'Available'), 0) AS available,
@@ -92,13 +146,6 @@ $openLoans = (int)$pdo->query("
     WHERE type = 'issue' AND return_date IS NULL AND status IN ('Borrowed','Overdue')
 ")->fetchColumn();
 
-$recent = $pdo->query("
-    SELECT * FROM transactions
-    WHERE type = 'issue'
-    ORDER BY COALESCE(return_date, issue_date) DESC, created_at DESC
-    LIMIT 20
-")->fetchAll();
-
 sendResponse([
     'activity' => $activity,
     'mostBorrowed' => array_map(static function ($row) {
@@ -116,8 +163,13 @@ sendResponse([
         'overdueCount' => count($overdue),
         'estimatedOverdueFines' => round($totalEstFines, 2),
         'finesAssessed' => round($finesAssessed, 2),
+        'finesUnpaid' => round($finesUnpaid, 2),
         'dueTodayCount' => $dueTodayCount,
     ],
-    'recent' => array_map('mapTransaction', $recent),
+    'recent' => $ledger['recent'],
+    'recentTotal' => $ledger['recentTotal'],
+    'recentPage' => $borrowPage,
+    'recentPageSize' => $borrowPageSize,
+    'recentSort' => $borrowSortKey,
     'asOf' => $today,
 ]);

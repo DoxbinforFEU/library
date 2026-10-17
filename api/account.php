@@ -66,9 +66,13 @@ if ($method === 'PUT' || $method === 'POST') {
         $params[] = $avatar;
     }
     if (array_key_exists('avatarPreset', $data)) {
-        $preset = $data['avatarPreset'] === '' || $data['avatarPreset'] === null ? null : (string)$data['avatarPreset'];
-        $fields[] = 'avatar_preset = ?';
-        $params[] = $preset;
+        $preset = $data['avatarPreset'] === '' || $data['avatarPreset'] === null ? null : trim((string)$data['avatarPreset']);
+        if ($preset !== null && !preg_match('/^#[0-9A-Fa-f]{6}$/', $preset)) {
+            $errors['avatarPreset'] = 'Avatar colour must be a hex colour such as #237A43.';
+        } else {
+            $fields[] = 'avatar_preset = ?';
+            $params[] = $preset;
+        }
     }
 
     if ($errors) {
@@ -79,8 +83,26 @@ if ($method === 'PUT' || $method === 'POST') {
     }
 
     $params[] = $row['id'];
-    $pdo->prepare('UPDATE auth_users SET ' . implode(', ', $fields) . ' WHERE id = ?')->execute($params);
+    try {
+        $pdo->prepare('UPDATE auth_users SET ' . implode(', ', $fields) . ' WHERE id = ?')->execute($params);
+    } catch (PDOException $e) {
+        // Lost a race with another request between the duplicate check above and this UPDATE.
+        if (isDuplicateKeyError($e, 'email')) {
+            sendValidationError(['email' => 'That email is already in use.']);
+        }
+        if (isDuplicateKeyError($e, 'username')) {
+            sendValidationError(['username' => 'That username is already in use.']);
+        }
+        throw $e;
+    }
     $fresh = loadAuthUser($pdo, (int)$row['id']);
+    $accountDetails = ['fields' => auditFieldNames($fields)];
+    foreach (['username', 'email'] as $k) {
+        if ($row[$k] !== $fresh[$k]) {
+            $accountDetails[$k] = [$row[$k], $fresh[$k]];
+        }
+    }
+    auditLogQuiet($pdo, 'account.update', 'account', (string)$row['id'], $accountDetails);
     $_SESSION['user'] = sessionFromRow($fresh);
     sendResponse([
         'message' => 'Account updated successfully',

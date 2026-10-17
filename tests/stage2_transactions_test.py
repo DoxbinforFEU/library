@@ -36,6 +36,8 @@ def sql(q):
 admin = make_client()
 s, _ = call(admin, "auth.php", "POST", {"action": "login", "username": "admin", "password": PW})
 check("login", s == 200, s)
+# Policy (Phase 3): unpaid fines block new loans. Seed history contains fines, so mark them paid for this suite.
+sql("update transactions set fine_paid_at=now() where fine>0 and fine_paid_at is null")
 manila = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 print(f"   (Manila today={manila}, UTC today={utc})")
