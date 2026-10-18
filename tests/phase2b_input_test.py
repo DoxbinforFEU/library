@@ -36,7 +36,6 @@ for p in ["books.php?category[]=x&limit=1", "books.php?search[]=a", "books.php?s
 
 # ---- L-01: arrays/objects as JSON values -> 422
 cases = [("books.php", "POST", {"title": ["a"], "author": "x"}), ("books.php", "POST", {"title": "t", "author": {"a": 1}}),
-         ("books.php", "POST", {"title": "t", "author": "a", "isbn": ["9780743273565"]}),
          ("users.php", "POST", {"lastName": ["x"], "firstName": "y", "contact": "a@b.co"}),
          ("users.php", "POST", {"lastName": "x", "firstName": "y", "contact": "a@b.co", "yearLevel": [1]}),
          ("transactions.php", "POST", {"type": "issue", "bookId": ["x"], "userId": "y"}),
@@ -48,10 +47,6 @@ for ep, m, b in cases:
     s, r = call(admin, ep, m, b); check(f"{m} {ep} {json.dumps(b)[:50]} -> 422", s == 422, (s, r))
 s, _ = call(client(), "auth.php", "POST", {"action": "login", "username": ["admin"], "password": "x"}); check("login with array username -> 422", s == 422, s)
 
-# ---- L-02: ISBN fits books.isbn VARCHAR(20)
-s, r = call(admin, "books.php", "POST", {"title": f"{TAG} isbn", "author": "T", "isbn": "978 0 7 4 3 2 7 3 5 6 5"}); check("isbn over 20 chars (13 digits + spaces) -> 422", s == 422, (s, r))
-s, r = call(admin, "books.php", "POST", {"title": f"{TAG} isbn ok", "author": "T", "isbn": "978-0-306-40615-7"}); check("hyphenated ISBN-13 (17 chars) accepted", s == 201, (s, r))
-isbn_book = r.get("id")
 
 # ---- L-02 / L-03: settings limits (original values restored at the end)
 orig = call(admin, "settings.php")[1]["settings"]
@@ -91,6 +86,5 @@ if HAVE_SQL:
 else:
     print("SKIP delete-race checks (set MYSQL_CLI)")
 
-if isbn_book: call(admin, f"books.php?id={isbn_book}", "DELETE")
 call(admin, "auth.php", "POST", {"action": "logout"})
 print(f"\n{passed} passed, {failed} failed"); sys.exit(1 if failed else 0)

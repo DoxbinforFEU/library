@@ -18,51 +18,6 @@ function developmentAdminPassword(): ?string {
     return $password;
 }
 
-function ensureDefaultAdmin(PDO $pdo): void {
-    $stmt = $pdo->prepare('SELECT id FROM auth_users WHERE username = ? LIMIT 1');
-    $stmt->execute([DEV_ADMIN_USERNAME]);
-    if ($stmt->fetch()) {
-        return;
-    }
-
-    $emailStmt = $pdo->prepare('SELECT id FROM auth_users WHERE email = ? LIMIT 1');
-    $emailStmt->execute([DEV_ADMIN_EMAIL]);
-    if ($emailStmt->fetch()) {
-        error_log('[feu-library] development admin seed skipped: the seed email is already in use');
-        return;
-    }
-
-    $password = developmentAdminPassword();
-    if ($password === null) {
-        error_log('[feu-library] development admin seed skipped: DEV_ADMIN_PASSWORD is not configured');
-        return;
-    }
-    $hash = password_hash($password, PASSWORD_DEFAULT);
-    try {
-        $insert = $pdo->prepare('
-            INSERT INTO auth_users (username, email, password_hash, display_name, role, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ');
-        $insert->execute([
-            DEV_ADMIN_USERNAME,
-            DEV_ADMIN_EMAIL,
-            $hash,
-            DEV_ADMIN_DISPLAY,
-            'admin',
-            'Active',
-        ]);
-    } catch (PDOException $e) {
-        if ((string)$e->getCode() !== '23000') {
-            throw $e;
-        }
-        $check = $pdo->prepare('SELECT id FROM auth_users WHERE username = ? LIMIT 1');
-        $check->execute([DEV_ADMIN_USERNAME]);
-        if (!$check->fetch()) {
-            throw $e;
-        }
-    }
-}
-
 function ensureDevCatalogSeed(PDO $pdo): void {
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS seed_meta (
@@ -182,12 +137,13 @@ function seedDevBooks(PDO $pdo): void {
     ];
 
     $stmt = $pdo->prepare('
-        INSERT INTO books (id, title, author, category, isbn, year, location, status, description, format, cover_url, renewal_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, \'Available\', ?, ?, ?, 0)
+        INSERT INTO books (id, title, author, category, year, location, status, description, format, cover_url, renewal_count)
+        VALUES (?, ?, ?, ?, ?, ?, \'Available\', ?, ?, ?, 0)
         ON DUPLICATE KEY UPDATE id = id
     ');
     foreach ($books as $b) {
-        $stmt->execute($b);
+        unset($b[4]); // the ISBN only feeds the cover URL above; it is no longer stored
+        $stmt->execute(array_values($b));
     }
 }
 

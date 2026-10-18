@@ -52,8 +52,8 @@ if ($method === 'GET') {
         $params[] = $category;
     }
     if ($search) {
-        $where[] = '(title LIKE ? ESCAPE \'\\\\\' OR author LIKE ? ESCAPE \'\\\\\' OR isbn LIKE ? ESCAPE \'\\\\\' OR location LIKE ? ESCAPE \'\\\\\')';
-        array_push($params, $search, $search, $search, $search);
+        $where[] = '(title LIKE ? ESCAPE \'\\\\\' OR author LIKE ? ESCAPE \'\\\\\' OR location LIKE ? ESCAPE \'\\\\\')';
+        array_push($params, $search, $search, $search);
     }
     $whereSql = implode(' AND ', $where);
     $total = countRows($pdo, "SELECT COUNT(*) FROM books WHERE $whereSql", $params);
@@ -101,7 +101,6 @@ function updateBookRow(PDO $pdo, string $id, array $data): void {
         'title' => 'title',
         'author' => 'author',
         'category' => 'category',
-        'isbn' => 'isbn',
         'year' => 'year',
         'location' => 'location',
         'description' => 'description',
@@ -124,12 +123,6 @@ function updateBookRow(PDO $pdo, string $id, array $data): void {
             $value = validateEnum($value, BOOK_CATEGORIES, 'category', $errors, true);
         } elseif ($col === 'format') {
             $value = validateEnum($value, BOOK_FORMATS, 'format', $errors, true);
-        } elseif ($col === 'isbn') {
-            $value = trim((string)$value);
-            if ($value !== '' && !validateIsbn($value)) {
-                $errors['isbn'] = 'Enter a valid ISBN.';
-            }
-            $value = $value === '' ? null : $value;
         } elseif ($col === 'year') {
             $value = validateYear($value, $errors);
         } elseif ($col === 'location') {
@@ -166,10 +159,6 @@ if ($method === 'POST') {
     $author = validateStringLength($data['author'] ?? '', 1, 255, 'author', $errors);
     $category = validateEnum($data['category'] ?? null, BOOK_CATEGORIES, 'category', $errors, true);
     $format = validateEnum($data['format'] ?? null, BOOK_FORMATS, 'format', $errors, true);
-    $isbn = trim((string)($data['isbn'] ?? ''));
-    if ($isbn !== '' && !validateIsbn($isbn)) {
-        $errors['isbn'] = 'Enter a valid ISBN.';
-    }
     $year = validateYear($data['year'] ?? null, $errors);
     $location = validateStringLength($data['location'] ?? '', 0, 20, 'location', $errors, false);
     $description = isset($data['description']) ? mb_substr(trim((string)$data['description']), 0, 4000) : null;
@@ -182,16 +171,15 @@ if ($method === 'POST') {
     try {
         $newId = nextBookId($pdo);
         $stmt = $pdo->prepare('
-            INSERT INTO books (id, title, author, category, isbn, year, location, status,
+            INSERT INTO books (id, title, author, category, year, location, status,
               description, format, cover_url, renewal_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         ');
         $stmt->execute([
             $newId,
             $title,
             $author,
             $category,
-            $isbn === '' ? null : $isbn,
             $year,
             $location === '' ? null : $location,
             'Available',

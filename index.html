@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FEU Roosevelt Library — Administration</title>
+<link rel="icon" type="image/png" href="img/favicon-64.png">
 <link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="style.css">
 <script src="js/theme-init.js"></script>
@@ -25,6 +26,7 @@
 
 <section class="login-screen" id="login-screen" hidden aria-labelledby="login-title">
   <section class="login-card">
+    <img class="login-logo" src="img/logo-112.png" alt="FEU Roosevelt" width="46" height="56">
     <p class="login-kicker">FEU Roosevelt · Library</p>
     <h1 id="login-title">Staff sign in</h1>
     <p class="login-description">Sign in to open the library dashboard.</p>
@@ -57,13 +59,12 @@
         <div class="header-left">
           <button class="hamburger" id="hamburger-btn" aria-label="Open navigation" aria-expanded="false" aria-controls="menubar"><span></span></button>
           <button class="brand" type="button" data-view="dashboard" aria-label="FEU Roosevelt Library — Home">
-            <span class="mark">FEU ROOSEVELT</span>
-            <span class="tag">Library</span>
+            <img class="brand-logo" src="img/logo-112.png" alt="" width="36" height="44">
           </button>
         </div>
         <nav class="menubar" id="menubar" aria-label="Primary">
           <div class="menubar-mobile-head">
-            <span class="mobile-head-mark">FEU ROOSEVELT<br>LIBRARY</span>
+            <img class="mobile-head-logo" src="img/logo-112.png" alt="FEU Roosevelt Library" width="40" height="48">
             <button class="menubar-close" id="menubar-close-btn" aria-label="Close navigation">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6L6 18"/></svg>
             </button>
@@ -160,30 +161,10 @@
                 <button type="submit" class="btn btn-primary hero-search-btn">Search</button>
               </form>
             </div>
-            <div class="site-hero-visual" aria-hidden="true">
-              <svg viewBox="0 0 360 400" preserveAspectRatio="xMidYMid meet">
-                <defs>
-                  <linearGradient id="heroLeaf" x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0" stop-color="var(--brass)"/>
-                    <stop offset="1" stop-color="var(--green)"/>
-                  </linearGradient>
-                </defs>
-                <circle cx="180" cy="200" r="150" fill="none" stroke="var(--line-strong)" stroke-width="1"/>
-                <circle cx="180" cy="200" r="112" fill="none" stroke="var(--line-strong)" stroke-width="1"/>
-                <g stroke="var(--ink-2)" stroke-width="1.4" fill="none" stroke-linecap="round">
-                  <path d="M180 260 C 130 250, 96 216, 92 168 C 90 140, 108 118, 132 118 C 154 118, 168 136, 168 160 L168 260"/>
-                  <path d="M180 260 C 230 250, 264 216, 268 168 C 270 140, 252 118, 228 118 C 206 118, 192 136, 192 160 L192 260"/>
-                  <line x1="180" y1="150" x2="180" y2="262"/>
-                </g>
-                <g stroke="var(--brass)" stroke-width="1.2" fill="none" stroke-linecap="round" opacity="0.9">
-                  <path d="M108 150 C 100 130, 108 108, 128 98"/>
-                  <path d="M252 150 C 260 130, 252 108, 232 98"/>
-                </g>
-                <circle cx="128" cy="96" r="4" fill="url(#heroLeaf)"/>
-                <circle cx="232" cy="96" r="4" fill="url(#heroLeaf)"/>
-                <line x1="60" y1="330" x2="300" y2="330" stroke="var(--line-strong)" stroke-width="1"/>
-                <text x="180" y="360" text-anchor="middle" font-family="var(--font-mono)" font-size="10" letter-spacing="3" fill="var(--ink-soft)">EST. LIBRARY COLLECTION</text>
-              </svg>
+            <div class="site-hero-visual">
+              <div class="hero-emblem">
+                <img src="img/logo-tamaraw.png" alt="FEU Roosevelt Tamaraw" width="400" height="567">
+              </div>
             </div>
           </div>
 

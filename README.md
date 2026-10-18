@@ -19,9 +19,11 @@ Paths below assume `C:\xampp` and the project in `C:\xampp\htdocs\library`. Open
    C:\xampp\php\php.exe tools\migrate.php --yes         (apply)
    ```
    Until this is done every API call answers `503`. Migrations are repeatable; running them again is a no-op.
-5. **Sign in** at `http://localhost/library/` as `admin` with your `DEV_ADMIN_PASSWORD`. In development the first API
-   request creates that account and a fictional sample catalog (rows named `SEED-…` / `[DEV SEED]`). Re-create or
-   reset the account with `C:\xampp\php\php.exe tools\seed_admin.php` (development only).
+5. **Create the first administrator** (development): `C:\xampp\php\php.exe tools\seed_admin.php` creates `admin` from
+   `DEV_ADMIN_PASSWORD`, only when no staff account exists. Or run `tools\create_admin.php` to choose your own username.
+   More accounts: `tools\add_admin.php`. Forgotten password: `tools\reset_password.php <username>`. No web request ever
+   creates or resets an account. Then sign in at `http://localhost/library/`. The first API request still adds a fictional
+   sample catalog (rows named `SEED-…` / `[DEV SEED]`).
 
 ## 2. Circulation rules (enforced by the server)
 
@@ -110,3 +112,13 @@ or database unavailable.
 * **MariaDB will not start (InnoDB log errors):** stop retrying, copy the whole data directory first, never delete
   `ibdata1` or `ib_logfile*`. See `AUDIT.md` for the recovery record.
 * **Import reports a duplicate constraint:** stop; do not recreate a database that holds records. Use `tools\migrate.php`.
+
+ C:\xampp\php\php.exe tools\reset_password.php (username) is the code for terminal to reset password of account.
+
+ New account is: C:\xampp\php\php.exe tools\add_admin.php
+
+ Account: Monboy
+ Password: FYiK86ph9-Q2JSZ
+
+ Account: Kyro
+ Password: skjnacpinasn

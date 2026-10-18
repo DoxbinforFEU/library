@@ -68,7 +68,6 @@ function mapBook(row) {
     title: row.title,
     author: row.author,
     category: row.category,
-    isbn: row.isbn,
     year: row.year == null || row.year === "" ? null : Number(row.year),
     location: row.location,
     status: row.status,
@@ -816,6 +815,21 @@ function applyTheme(pref, persist=true){
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=>{
   if((localStorage.getItem(STORAGE.theme)||"light")==="system") applyTheme("system", false);
 });
+/* Paints the saved theme without touching any view. Used on the sign-in screen (which has no theme control of its own),
+   so it always matches the dashboard even if js/theme-init.js did not run. */
+function syncThemeFromStorage(){
+  let pref = "light";
+  try{ pref = localStorage.getItem(STORAGE.theme) || "light"; }catch(e){}
+  const dark = pref==="dark" || (pref==="system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  document.documentElement.setAttribute("data-theme-pref", pref);
+}
+/* Another tab changed the theme: follow it (sign-in screen or dashboard). */
+window.addEventListener("storage", e=>{
+  if(e.key !== STORAGE.theme) return;
+  if($("#login-screen") && !$("#login-screen").hidden) syncThemeFromStorage();
+  else applyTheme(e.newValue || "light", false);
+});
 
 /* ==================================================================
    BOOK CARDS (shared by collection, related and recently viewed)
@@ -1042,7 +1056,7 @@ function getFilteredBooks(){
   const {search, category, filters, sort} = state.books;
   const q = search.trim().toLowerCase();
   let list = BOOKS.filter(b=>{
-    const matchesSearch = !q || [b.title,b.author,b.isbn,b.category].some(v=>String(v ?? "").toLowerCase().includes(q));
+    const matchesSearch = !q || [b.title,b.author,b.category].some(v=>String(v ?? "").toLowerCase().includes(q));
     const matchesCategory = category==="all" || b.category===category;
     const matchesSubject = !filters.subjects.length || filters.subjects.includes(b.category);
     const matchesAuthor = !filters.authors.length || filters.authors.includes(b.author);
@@ -1331,7 +1345,6 @@ function renderBookDetails(id){
 
   $("#bd-meta").innerHTML = `
     <div class="bd-meta-item"><span class="bd-meta-k">Publication year</span><span class="bd-meta-v">${book.year==null ? "—" : (book.year<0 ? Math.abs(book.year)+" BC" : book.year)}</span></div>
-    <div class="bd-meta-item"><span class="bd-meta-k">ISBN</span><span class="bd-meta-v cell-mono">${esc(book.isbn || "—")}</span></div>
     <div class="bd-meta-item"><span class="bd-meta-k">Category</span><span class="bd-meta-v">${esc(book.category || "—")}</span></div>
     <div class="bd-meta-item"><span class="bd-meta-k">Format</span><span class="bd-meta-v">${esc(book.format || "Not recorded")}</span></div>
     <div class="bd-meta-item"><span class="bd-meta-k">Shelf</span><span class="bd-meta-v">${esc(book.location || "—")}</span></div>
@@ -1383,7 +1396,7 @@ function wireRowActions(root, kind){
 
 /* ---------- Book modal (add / edit / view) ---------- */
 function bookFormTemplate(book, readonly){
-  const b = book || {title:"",author:"",category:CATEGORIES[0],isbn:"",year:"",location:"",description:"",format:"",cover:""};
+  const b = book || {title:"",author:"",category:CATEGORIES[0],year:"",location:"",description:"",format:"",cover:""};
   const dis = readonly ? "disabled" : "";
   const uncategorized = book && !CATEGORIES.includes(book.category) ? `<option value="" selected>Uncategorized</option>` : "";
   return `
@@ -1393,10 +1406,9 @@ function bookFormTemplate(book, readonly){
       <div class="field"><label for="f-category">Category</label>
         <select id="f-category" ${dis}>${uncategorized}${CATEGORIES.map(c=>`<option ${c===b.category?"selected":""}>${c}</option>`).join("")}</select>
       </div>
-      <div class="field"><label for="f-isbn">ISBN</label><input id="f-isbn" type="text" value="${esc(b.isbn)}" ${dis} required><div class="err"></div></div>
       <div class="field"><label for="f-year">Publication Year</label><input id="f-year" type="number" value="${b.year ?? ""}" ${dis}><div class="err"></div></div>
       <div class="field"><label for="f-location">Shelf / Location</label><input id="f-location" type="text" value="${esc(b.location)}" placeholder="e.g. A-12" ${dis} required><div class="err"></div></div>
-      <div class="field"><label for="f-format">Format</label>
+      <div class="field full"><label for="f-format">Format</label>
         <select id="f-format" ${dis}><option value="">Not recorded</option>${FORMATS.map(f=>`<option ${f===b.format?"selected":""}>${f}</option>`).join("")}</select>
       </div>
       <div class="field full"><label for="f-description">Description</label><textarea id="f-description" rows="3" ${dis}>${esc(b.description)}</textarea><div class="hint">Optional. Leave blank if there is none.</div></div>
@@ -1433,7 +1445,6 @@ async function saveBookForm(modalEl, existing){
     title: $("#f-title",modalEl).value.trim(),
     author: $("#f-author",modalEl).value.trim(),
     category: $("#f-category",modalEl).value,
-    isbn: $("#f-isbn",modalEl).value.trim(),
     year: parseInt($("#f-year",modalEl).value,10),
     location: $("#f-location",modalEl).value.trim(),
     format: $("#f-format",modalEl).value,
@@ -1443,10 +1454,9 @@ async function saveBookForm(modalEl, existing){
   if (!Number.isFinite(vals.year)) vals.year = null;
   let firstBad = null;
   const flag = (id, msg)=>{ const el = $("#"+id, modalEl); setFieldError(el, msg); firstBad = firstBad || el; };
-  ["f-title","f-author","f-isbn","f-location","f-cover","f-year"].forEach(id=> clearFieldError($("#"+id, modalEl)));
+  ["f-title","f-author","f-location","f-cover","f-year"].forEach(id=> clearFieldError($("#"+id, modalEl)));
   if(!vals.title) flag("f-title","Enter the title.");
   if(!vals.author) flag("f-author","Enter the author.");
-  if(!vals.isbn) flag("f-isbn","Enter the ISBN.");
   if(!vals.location) flag("f-location","Enter the shelf location.");
   if(vals.cover && !/^https?:\/\//i.test(vals.cover)) flag("f-cover","Enter a full http(s) image address.");
   if(firstBad){ shakeModal(modalEl); firstBad.focus(); return; }
@@ -1611,7 +1621,7 @@ function userFormTemplate(user, readonly){
       <div class="name-row">
         <div class="field"><label for="f-lastname">Last Name</label><input id="f-lastname" type="text" value="${esc(u.lastName)}" ${dis} required><div class="err"></div></div>
         <div class="field"><label for="f-firstname">First Name</label><input id="f-firstname" type="text" value="${esc(u.firstName)}" ${dis} required><div class="err"></div></div>
-        <div class="field"><label for="f-middleinitial">Middle Initial</label><input id="f-middleinitial" type="text" value="${esc(u.middleInitial)}" maxlength="1" autocomplete="off" ${dis}></div>
+        <div class="field"><label for="f-middleinitial">Middle Initial</label><input id="f-middleinitial" type="text" value="${esc(u.middleInitial)}" maxlength="1" autocomplete="off" ${readonly ? "" : 'placeholder="(Optional)"'} ${dis}></div>
       </div>
       <div class="field"><label for="f-program">Course / Program</label>
         <select id="f-program" ${dis}>${user && !u.program ? `<option value="" selected>Not specified</option>` : ""}${(user && u.program && !PROGRAMS.includes(u.program) ? [u.program, ...PROGRAMS] : PROGRAMS).map(p=>`<option ${p===u.program?"selected":""}>${esc(p)}</option>`).join("")}</select>
@@ -1903,7 +1913,7 @@ function renderIssueBookList(scroll){
   const list = $("#issue-book-list"), input = $("#issue-book-search");
   const q = state.issue.bq.trim().toLowerCase();
   const all = BOOKS.filter(b=> (!state.issue.availOnly || b.status==="Available")
-    && (!q || [b.title, b.author, b.category, b.location, b.isbn].some(v=> String(v ?? "").toLowerCase().includes(q))));
+    && (!q || [b.title, b.author, b.category, b.location].some(v=> String(v ?? "").toLowerCase().includes(q))));
   const rows = all.slice(0, ISSUE_ROW_CAP);
   issueUi.bRows = rows;
   issueUi.bIdx = Math.min(issueUi.bIdx, Math.max(0, rows.length - 1));
@@ -2654,7 +2664,7 @@ function clearFieldError(input){
   input.removeAttribute("aria-invalid");
   input.removeAttribute("aria-describedby");
 }
-const BOOK_FIELD_IDS = {title:"f-title", author:"f-author", category:"f-category", isbn:"f-isbn", year:"f-year", location:"f-location", format:"f-format", description:"f-description", cover:"f-cover"};
+const BOOK_FIELD_IDS = {title:"f-title", author:"f-author", category:"f-category", year:"f-year", location:"f-location", format:"f-format", description:"f-description", cover:"f-cover"};
 const USER_FIELD_IDS = {lastName:"f-lastname", firstName:"f-firstname", middleInitial:"f-middleinitial", program:"f-program", yearLevel:"f-yearlevel", contact:"f-contact"};
 /* Show the server's per-field validation messages next to their inputs. Returns false if any
    field can't be mapped, so the caller falls back to a toast. */
@@ -3201,6 +3211,7 @@ document.addEventListener("keydown", e=>{
 
 /* Boot */
 function showLoginScreen(message=""){
+  syncThemeFromStorage();
   $("#loading-screen").style.display = "none";
   $("#app").style.visibility = "hidden";
   $("#login-screen").hidden = false;

@@ -178,6 +178,7 @@ h1,h2,h3,h4,p{margin:0;}
   background:var(--white);
   box-shadow:var(--shadow-lg);
 }
+.login-logo{display:block; width:46px; height:auto; margin-bottom:16px;}
 .login-kicker{
   margin-bottom:12px;
   color:var(--green);
@@ -243,25 +244,15 @@ html[data-theme="dark"] .app-header::before{background:rgba(6,20,14,0.82);}
 }
 .header-left{display:flex; align-items:center; gap:14px; min-width:0;}
 .brand{
-  display:flex; flex-direction:column; align-items:flex-start;
-  background:none; border:none; cursor:pointer; padding:0; text-align:left;
+  display:flex; align-items:center;
+  background:none; border:none; cursor:pointer; padding:2px; border-radius:var(--radius-sm);
   min-width:0;
 }
-.brand .mark{
-  font-family:var(--font-display);
-  font-size:19px; font-weight:600; color:var(--green-deep); letter-spacing:0.01em; line-height:1.1;
-  position:relative; padding-bottom:3px;
-  background-image:linear-gradient(var(--brass),var(--brass));
-  background-repeat:no-repeat; background-size:0% 1.5px; background-position:left bottom;
-  transition:background-size .35s cubic-bezier(.22,.9,.32,1);
+.brand-logo{
+  height:44px; width:auto; display:block;
+  transition:transform .3s var(--ease-editorial), filter .3s ease;
 }
-.brand:hover .mark, .brand:focus-visible .mark{background-size:100% 1.5px;}
-html[data-theme="dark"] .brand .mark{color:var(--brass);}
-html[data-theme="dark"] .brand .tag{color:var(--brass);}
-.brand .tag{
-  font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.2em;
-  text-transform:uppercase; color:var(--ink-soft); margin-top:3px;
-}
+.brand:hover .brand-logo,.brand:focus-visible .brand-logo{transform:translateY(-2px) scale(1.04); filter:drop-shadow(0 4px 8px rgba(13,53,30,0.28));}
 .header-actions{margin-left:auto; display:flex; align-items:center; gap:10px; position:relative;}
 .search-toggle{display:none;}
 .hamburger{
@@ -429,7 +420,11 @@ html[data-theme="dark"] .brand .tag{color:var(--brass);}
 .site-hero-visual{
   position:relative; z-index:1; flex-shrink:0; width:280px; max-width:34vw;
 }
-.site-hero-visual svg{width:100%; height:auto; display:block;}
+.hero-emblem{position:relative; width:100%; aspect-ratio:1; display:grid; place-items:center;}
+.hero-emblem::before,.hero-emblem::after{content:''; position:absolute; border-radius:50%; border:1px solid var(--line-strong); pointer-events:none;}
+.hero-emblem::before{inset:0;}
+.hero-emblem::after{inset:13%; border-color:var(--brass); opacity:0.55;}
+.hero-emblem img{position:relative; z-index:1; width:56%; height:auto; display:block; filter:drop-shadow(0 14px 22px rgba(13,53,30,0.25));}
 /* ============================================================
    SITE SECTIONS (shared rhythm for homepage blocks)
    ============================================================ */
@@ -1106,10 +1101,7 @@ html[data-density="compact"] .panel{padding:16px;}
     display:flex; align-items:flex-start; justify-content:space-between;
     padding-bottom:22px; margin-bottom:10px; border-bottom:1px solid rgba(247,245,239,0.16);
   }
-  .mobile-head-mark{
-    font-family:var(--font-display); font-weight:600; font-size:16px; line-height:1.25;
-    color:#F7F5EF; letter-spacing:0.01em;
-  }
+  .mobile-head-logo{height:48px; width:auto; display:block;}
   .menubar-close{
     width:32px; height:32px; border-radius:50%; border:1px solid rgba(247,245,239,0.24);
     background:transparent; color:#F7F5EF; display:flex; align-items:center; justify-content:center;
@@ -1669,4 +1661,11 @@ html[data-theme="dark"] .issue-change{color:var(--ink);}
   .issue-bar .btn{width:100%;}
   #return-bar .field{width:100%;}
   .od-toolbar .sort-select{width:100%; margin-left:0;}
+}
+/* Placeholder text readable in both themes */
+.field input::placeholder,.field textarea::placeholder{color:var(--ink-muted); opacity:1;}
+/* Browser autofill must not paint a light-blue box on the (possibly dark) sign-in card */
+.login-card input:-webkit-autofill,.login-card input:-webkit-autofill:focus{
+  -webkit-text-fill-color:var(--ink); caret-color:var(--ink);
+  -webkit-box-shadow:0 0 0 1000px var(--white) inset; box-shadow:0 0 0 1000px var(--white) inset;
 }

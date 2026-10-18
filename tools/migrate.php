@@ -34,10 +34,9 @@ try {
 
     if ($dryRun && tableExists($pdo, 'books')) {
         $out('Information (read-only):');
-        $dups = $pdo->query("SELECT isbn, COUNT(*) c, GROUP_CONCAT(id) ids FROM books WHERE deleted_at IS NULL AND isbn IS NOT NULL AND isbn <> '' GROUP BY isbn HAVING c > 1")->fetchAll();
-        $out('  duplicate ISBNs: ' . ($dups ? '' : 'none'));
-        foreach ($dups as $d) {
-            $out("    {$d['isbn']} x{$d['c']} ({$d['ids']})");
+        if (columnExists($pdo, 'books', 'isbn')) {
+            $withIsbn = (int)$pdo->query("SELECT COUNT(*) FROM books WHERE isbn IS NOT NULL AND isbn <> ''")->fetchColumn();
+            $out("  books with an ISBN value (migration 009 deletes these values for good): $withIsbn");
         }
         $stale = (int)$pdo->query("SELECT COUNT(*) FROM books b WHERE b.status IN ('Borrowed','Overdue') AND b.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.book_id = b.id AND t.return_date IS NULL)")->fetchColumn();
         $out("  books marked on loan with no open loan record: $stale");

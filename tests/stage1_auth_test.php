@@ -115,7 +115,6 @@ $dup = $mk(1062, "SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicat
 check('duplicate key detected (any key)', isDuplicateKeyError($dup));
 check('duplicate key detected for the named key', isDuplicateKeyError($dup, 'username') && !isDuplicateKeyError($dup, 'email'));
 check('other SQL errors are not duplicate keys', !isDuplicateKeyError($mk(1213, 'Deadlock found')) && !isDuplicateKeyError(new RuntimeException('x')));
-check('ISBN longer than the column is invalid', !validateIsbn('978 0 7 4 3 2 7 3 5 6 5') && validateIsbn('978-0-306-40615-7'));
 
 // --- same-origin guard
 $_SERVER['REQUEST_METHOD'] = 'POST'; $_SERVER['HTTP_HOST'] = 'localhost';

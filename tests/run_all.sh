@@ -13,6 +13,7 @@ run python3 tests/phase2c_audit_test.py
 run python3 tests/phase3a_policy_test.py
 run python3 tests/phase4_perf_test.py
 run python3 tests/phase5a_test.py
+run python3 tests/phase6_account_test.py
 run python3 tests/web_exposure_check.py
 run python3 tests/stage3_api_test.py
 if [ -d node_modules/jsdom ]; then run node tests/stage7_ui_smoke.js; else echo; echo "=== SKIP UI smoke (run: npm i --no-save jsdom)"; fi

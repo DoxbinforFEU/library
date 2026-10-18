@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/schema_guard.php';
 
 /** Id of the newest migration. Requests refuse to run until this one is recorded. */
-const MIGRATION_LATEST = '008_drop_redundant_indexes';
+const MIGRATION_LATEST = '009_drop_book_isbn';
 
 function tableExists(PDO $pdo, string $table): bool {
     $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
@@ -216,6 +216,19 @@ function migrationList(): array {
                     if (indexExists($pdo, 'transactions', $ix)) {
                         $pdo->exec("ALTER TABLE transactions DROP INDEX `$ix`");
                     }
+                }
+            },
+        ],
+        [
+            'id' => '009_drop_book_isbn',
+            'title' => 'Remove books.isbn and its index. PERMANENTLY deletes every stored ISBN value (back up first)',
+            'preflight' => fn(PDO $pdo): array => [],
+            'apply' => function (PDO $pdo): void {
+                if (indexExists($pdo, 'books', 'idx_books_isbn')) {
+                    $pdo->exec('ALTER TABLE books DROP INDEX idx_books_isbn');
+                }
+                if (columnExists($pdo, 'books', 'isbn')) {
+                    $pdo->exec('ALTER TABLE books DROP COLUMN isbn');
                 }
             },
         ],

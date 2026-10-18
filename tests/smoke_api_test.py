@@ -137,7 +137,7 @@ else:
 
 # ======================= BOOKS =======================
 mk = lambda t, **kw: call(admin, "books.php", "POST", {"title": t, "author": "Smoke Tester", **kw})
-for label, body in [("missing title", {"author": "A"}), ("bad ISBN", {"title": "T", "author": "A", "isbn": "123"}),
+for label, body in [("missing title", {"author": "A"}), 
                     ("bad year", {"title": "T", "author": "A", "year": -9999}), ("bad category", {"title": "T", "author": "A", "category": "Nope"}),
                     ("javascript: cover", {"title": "T", "author": "A", "cover": "javascript:alert(1)"}),
                     ("title over 255 chars", {"title": "T" * 256, "author": "A"}), ("empty body", {})]:
@@ -147,10 +147,11 @@ s, _ = call(admin, "books.php", "POST", raw=b'{"title":"' + b"x" * 2_100_000 + b
 s, _ = call(admin, "books.php", "PATCH", {}); check("books unsupported method -> 405", s == 405, s)
 
 TOKEN = f"SMK{RUN}"
-s, r = mk(f"{TOKEN} 50% off_sale", isbn="9780743273565", category="Science")
+s, r = mk(f"{TOKEN} 50% off_sale", category="Science")
 check("book create -> 201", s == 201, (s, r)); b0 = r["book"]; cleanup["books"].append(b0["id"])
 check("no fabricated description/format/cover", b0["description"] is None and b0["format"] is None and b0["cover"] is None, b0)
 check("new book is Available with 0 borrows", b0["status"] == "Available" and b0["borrowCount"] == 0, b0)
+check("books no longer carry an ISBN", "isbn" not in b0, b0)
 s, r = call(admin, f"books.php?id={b0['id']}"); check("get by id", s == 200 and r["book"]["title"].startswith(TOKEN), (s, r))
 check("unknown book id -> 404", call(admin, "books.php?id=NOPE-000")[0] == 404)
 s, r = call(admin, f"books.php?id={b0['id']}", "PUT", {"description": "note", "format": "Paperback", "cover": "https://example.org/c.jpg"})

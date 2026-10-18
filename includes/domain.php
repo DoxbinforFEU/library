@@ -105,7 +105,6 @@ function mapBook(array $row): array {
         'title' => $row['title'],
         'author' => $row['author'],
         'category' => $row['category'],
-        'isbn' => $row['isbn'],
         'year' => $row['year'] === null ? null : (int)$row['year'],
         'location' => $row['location'],
         'status' => $status,

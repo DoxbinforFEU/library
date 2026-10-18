@@ -113,18 +113,6 @@ function validateEmail(string $email): bool {
     return strlen($email) <= 255 && (bool)filter_var($email, FILTER_VALIDATE_EMAIL);
 }
 
-function validateIsbn(?string $isbn): bool {
-    if ($isbn === null || $isbn === '') {
-        return true;
-    }
-    if (strlen($isbn) > 20) { // books.isbn is VARCHAR(20); the raw value (with hyphens/spaces) is what gets stored
-        return false;
-    }
-    $digits = preg_replace('/[^0-9Xx]/', '', $isbn);
-    $len = strlen($digits);
-    return $len === 10 || $len === 13;
-}
-
 function validateYear($year, array &$errors, string $key = 'year'): ?int {
     if ($year === null || $year === '') {
         return null;
