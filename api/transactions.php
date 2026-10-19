@@ -253,6 +253,11 @@ try {
         if (!$open) {
             failTx($pdo, 'No open loan found for this book.', 409);
         }
+        // The screen may be stale (returned and re-issued to someone else meanwhile): renew only the loan it showed.
+        $renewUserId = idField($data, ['userId', 'user_id']);
+        if ($renewUserId !== '' && $open['user_id'] && $renewUserId !== (string)$open['user_id']) {
+            failTx($pdo, 'Patron does not match the active loan.', 409);
+        }
         if ($open['due_date'] !== null && $open['due_date'] < $today) {
             failTx($pdo, 'Overdue loans cannot be renewed. Return the book and settle the fine first.', 409);
         }

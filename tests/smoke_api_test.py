@@ -265,6 +265,7 @@ check("second return of same loan -> 409", ret(admin, books[0])[0] == 409)
 codes = [renew(books[2])[0] for _ in range(max_ren + 1)]
 check(f"renewals: {max_ren} allowed then 409", codes == [200] * max_ren + [409], codes)
 check("renew of a book that is not on loan -> 409", renew(books[max_books + 1])[0] == 409)
+check("renew naming the wrong patron -> 409", call(admin, "transactions.php", "POST", {"type": "renew", "bookId": books[2], "userId": p2["id"]})[0] == 409)
 
 # reservations
 check("reserve an available title -> 400", call(admin, "reservations.php", "POST", {"bookId": books[max_books + 1], "userId": p2["id"]})[0] == 400)

@@ -78,6 +78,7 @@ function mapBook(row) {
     format: row.format,
     cover: row.cover ?? row.cover_url ?? null,
     borrowCount: Number(row.borrowCount ?? row.borrow_count ?? 0),
+    renewalCount: Number(row.renewalCount ?? row.renewal_count ?? 0),
   };
 }
 function mapUser(row) {
@@ -352,6 +353,7 @@ function revealStagger(els, opts={}){
   return gsap.from(els,{
     opacity:0, y:opts.y ?? 16, duration:opts.duration ?? 0.5,
     stagger:opts.stagger ?? 0.05, ease:"power2.out", delay:opts.delay ?? 0,
+    clearProps:"opacity,transform", // GSAP otherwise leaves an inline transform that overrides CSS :hover lifts
   });
 }
 
@@ -374,7 +376,7 @@ function transitionView(oldEl, newEl, onSwapped){
   );
   const staggerTargets = newEl.querySelectorAll(".panel, .card, .table-card, .card-list, .wizard");
   if(staggerTargets.length){
-    tl.from(staggerTargets,{opacity:0, y:16, duration:0.45, stagger:0.045, ease:"power2.out"},"-=0.32");
+    tl.from(staggerTargets,{opacity:0, y:16, duration:0.45, stagger:0.045, ease:"power2.out", clearProps:"opacity,transform"},"-=0.32");
   }
   return tl;
 }
@@ -409,6 +411,7 @@ function showToast(message, opts={}){
   const kind = opts.kind || (opts.warn ? "warn" : "success");
   el.className = "toast toast-" + kind;
   el.setAttribute("role", kind==="error" ? "alert" : "status");
+  el.style.setProperty("--toast-hold", (opts.hold ?? 2.6) + "s");
   const iconSvg = kind==="error" || kind==="warn"
     ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.9 18.3A1.6 1.6 0 0 0 3.3 20.7h17.4a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-3.4 0z"/></svg>'
     : kind==="info"
@@ -904,6 +907,16 @@ function renderBookRow(containerId, books){
 let REPORT = null;
 async function loadReport(){ REPORT = await api("reports.php"); return REPORT; }
 function peso(n){ return "₱" + Number(n || 0).toFixed(2); }
+/* Placeholder shapes shown while a report loads (the real chart and rows replace them). */
+function reportSkeletonHTML(){
+  const kpi = `<div class="bar-kpi"><span class="skel skel-kpi-k"></span><span class="skel skel-kpi-v"></span></div>`;
+  return `<div class="skel-report" role="status"><span class="sr-only">Loading report…</span>
+    <div class="bar-kpis">${kpi}${kpi}${kpi}</div>
+    <div class="skel-bars" aria-hidden="true">${'<span class="skel"></span>'.repeat(7)}</div></div>`;
+}
+function skeletonRowsHTML(n){
+  return Array.from({length:n}, ()=>`<tr class="skel-row" aria-hidden="true"><td colspan="7"><span class="skel skel-line"></span></td></tr>`).join("");
+}
 function errorWithRetry(el, msg, onRetry){
   el.innerHTML = `<div class="dash-status" role="alert" style="margin:0;"><span>${esc(msg)}</span><button class="btn btn-secondary btn-sm" type="button" data-retry>Retry</button></div>`;
   el.querySelector("[data-retry]").addEventListener("click", onRetry);
@@ -1014,6 +1027,7 @@ function renderActivityChart(targetId, activity){
 }
 
 /* ---------- Notifications: real counts from api/notifs.php ---------- */
+let lastNotifSig = "";
 async function refreshNotifications(){
   const list = $("#notif-list"), dot = $("#notif-dot");
   if(!list) return;
@@ -1021,6 +1035,9 @@ async function refreshNotifications(){
   try{ items = (await api("notifs.php")).items || []; }
   catch(e){ list.innerHTML = `<div class="drop-empty">Notifications are unavailable.</div>`; dot.hidden = true; return; }
   dot.hidden = items.length===0;
+  const sig = items.map(n=>n.title).join("|");
+  if(items.length && sig !== lastNotifSig) nudgeBell();
+  lastNotifSig = sig;
   list.innerHTML = items.map(n=>`<button class="drop-item" type="button" data-kind="${esc(n.kind)}"><span>${esc(n.title)}</span><small>${esc(n.when)}</small></button>`).join("")
     || `<div class="drop-empty">You're all caught up.</div>`;
   $all("[data-kind]", list).forEach(btn=> btn.addEventListener("click", ()=>{
@@ -1269,7 +1286,11 @@ function syncFiltersPanel(){
   const toggle = $("#books-filter-toggle");
   toggle?.querySelector(".filter-count")?.remove();
   const count = filtersActiveCount();
-  if(toggle && count>0) toggle.insertAdjacentHTML("beforeend", `<span class="filter-count">${count}</span>`);
+  if(toggle && count>0){
+    const changed = toggle.dataset.count !== String(count);
+    toggle.insertAdjacentHTML("beforeend", `<span class="filter-count${changed ? " is-new" : ""}">${count}</span>`);
+  }
+  if(toggle) toggle.dataset.count = String(count);
 }
 buildFiltersPanel();
 $("#books-filter-toggle")?.addEventListener("click", ()=>{
@@ -1588,8 +1609,8 @@ function renderUsers(){
       </div>
     </div>`).join("");
 
-  gsap.from($all("tbody tr", tbody),{opacity:0, y:10, duration:0.35, stagger:0.03, ease:"power2.out"});
-  gsap.from($all(".record-card", cardList),{opacity:0, y:10, duration:0.35, stagger:0.03, ease:"power2.out"});
+  gsap.from($all("tbody tr", tbody),{opacity:0, y:10, duration:0.35, stagger:0.03, ease:"power2.out", clearProps:"opacity,transform"});
+  gsap.from($all(".record-card", cardList),{opacity:0, y:10, duration:0.35, stagger:0.03, ease:"power2.out", clearProps:"opacity,transform"});
 
   wireRowActions(tbody, "user");
   wireRowActions(cardList, "user");
@@ -1941,6 +1962,7 @@ function renderIssueBar(){
   $("#issue-due-date").disabled = !ready;
   const btn = $("#issue-confirm-btn");
   btn.disabled = !ready || issueUi.busy;
+  btn.classList.toggle("is-saving", issueUi.busy);
   btn.textContent = issueUi.busy ? "Issuing…" : issueUi.failed ? "Try again" : "Confirm & issue";
 }
 function renderIssueLog(){
@@ -2104,11 +2126,11 @@ document.addEventListener("keydown", e=>{
 const RETURN_ROW_CAP = 50;
 const returnLog = [];
 let returnCount = 0;
-const returnUi = { idx:0, busy:false, failed:false, rows:[] };
+const returnUi = { idx:0, busy:false, failed:false, renewing:false, rows:[] };
 
 function resetReturnWizard(){
   state.ret = { bookId:null, q:"", returnDate:null, fine:0, overdueDays:0 };
-  Object.assign(returnUi, { idx:0, busy:false, failed:false });
+  Object.assign(returnUi, { idx:0, busy:false, failed:false, renewing:false });
   $("#return-search").value = "";
   $("#return-loan-msg").textContent = "";
   $("#return-error").hidden = true;
@@ -2186,8 +2208,10 @@ function renderReturnBar(){
     : `<span class="issue-hint">Select a borrowed title to continue.</span><small>${esc(fineNote)}</small>`;
   $("#return-date-input").disabled = !ready;
   const btn = $("#return-confirm-btn");
-  btn.disabled = !ready || returnUi.busy;
+  btn.disabled = !ready || returnUi.busy || returnUi.renewing;
+  btn.classList.toggle("is-saving", returnUi.busy);
   btn.textContent = returnUi.busy ? "Returning…" : returnUi.failed ? "Try again" : "Confirm return";
+  renderReturnRenew();
 }
 
 function renderReturnLog(){
@@ -2282,8 +2306,56 @@ function updateReturnCalc(){
   renderReturnBar();
 }
 
+/* Why this loan cannot be renewed right now ("" when it can). The server enforces the same rules and has the last word. */
+function renewBlockHint(b){
+  if(!b) return "";
+  if(b.dueDate && b.dueDate < isoDaysAgo(0)) return "Overdue loans cannot be renewed. Return the book and settle the fine first.";
+  const used = b.renewalCount || 0, max = CONFIG.maxRenewals || 0;
+  if(used >= max) return `Renewal limit reached (${used} of ${max}).`;
+  return "";
+}
+function renderReturnRenew(){
+  const b = state.ret.bookId ? findBook(state.ret.bookId) : null;
+  const btn = $("#return-renew-btn"), info = $("#return-renew-info");
+  if(!b || !btn || !info) return;
+  const hint = renewBlockHint(b), used = b.renewalCount || 0, max = CONFIG.maxRenewals || 0;
+  info.textContent = hint || `Renewal ${used + 1} of ${max}: new due date ${fmtDate(addDaysISO(isoDaysAgo(0), CONFIG.loanDays))} (${CONFIG.loanDays} days from today). Reservations are checked when you renew.`;
+  btn.disabled = !!hint || returnUi.renewing || returnUi.busy;
+  btn.classList.toggle("is-saving", returnUi.renewing);
+  btn.textContent = returnUi.renewing ? "Renewing…" : "Renew loan";
+}
+/* Extends the SAME loan by the configured loan period from today. Same transaction row, no return/re-issue. */
+async function submitRenew(){
+  if(returnUi.busy || returnUi.renewing) return;
+  const b = findBook(state.ret.bookId), err = $("#return-error");
+  if(!b || (b.status!=="Borrowed" && b.status!=="Overdue")){ err.textContent = "This title is not currently on loan."; err.hidden = false; return; }
+  const why = renewBlockHint(b);
+  if(why){ err.textContent = why; err.hidden = false; return; }
+  returnUi.renewing = true; err.hidden = true;
+  renderReturnBar();
+  try {
+    const res = await api("transactions.php", { method:"POST", body: JSON.stringify({ type:"renew", bookId: b.id, userId: b.borrowedBy }) });
+    try { await refreshAffected(b.id, b.borrowedBy); }
+    catch (e) { showToast("Renewed, but the lists could not refresh. Reload the page.", {warn:true}); }
+    const due = (res.transaction && res.transaction.dueDate) || (findBook(b.id) || {}).dueDate;
+    returnUi.renewing = false;
+    showToast(`Loan renewed. New due date: ${fmtDate(due)}.`);
+    renderReturn();
+  } catch (e) {
+    returnUi.renewing = false;
+    err.textContent = e.message; err.hidden = false;
+    if(!e.sessionExpired && (e.status===409 || e.status===404)){
+      // The loan changed under us: re-read it so the screen shows the truth.
+      try { await refreshAffected(b.id, b.borrowedBy); } catch (_) {}
+      const fresh = findBook(b.id);
+      if(!fresh || (fresh.status!=="Borrowed" && fresh.status!=="Overdue")){ state.ret.bookId = null; returnUi.idx = 0; }
+    }
+    renderReturn();
+  }
+}
+
 async function submitReturn(){
-  if(returnUi.busy) return;
+  if(returnUi.busy || returnUi.renewing) return;
   const b = findBook(state.ret.bookId);
   const err = $("#return-error");
   if(!b){ err.textContent = "Select a loan first."; err.hidden = false; return; }
@@ -2340,6 +2412,7 @@ $("#return-loan-selected").addEventListener("click", e=>{
 });
 $("#return-date-input").addEventListener("change", ()=>{ $("#return-error").hidden = true; returnUi.failed = false; updateReturnCalc(); });
 $("#return-confirm-btn").addEventListener("click", submitReturn);
+$("#return-renew-btn").addEventListener("click", submitRenew);
 $("#return-restart-btn").addEventListener("click", resetReturnWizard);
 document.addEventListener("keydown", e=>{
   if(e.key!=="Enter" || !(e.ctrlKey || e.metaKey) || state.currentView!=="return" || scrollLockCount>0) return;
@@ -2564,16 +2637,19 @@ async function renderBorrowingReport(ctx){
   const draw = async ()=>{
     if(state.reportType !== "borrowing") return;
     const requestId = ++borrowingReportRequest;
+    if(!tbody.querySelector(".skel-row")) tbody.classList.add("is-loading"); // dim the old rows while a new page loads
     let data;
     try {
       data = await api(borrowingLedgerQuery());
     } catch (err) {
+      if(requestId === borrowingReportRequest) tbody.classList.remove("is-loading");
       if(requestId !== borrowingReportRequest || state.reportType !== "borrowing") return;
       tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--ink-soft); padding:30px;">Could not load borrowing records: ${esc(err.message)}</td></tr>`;
       list.innerHTML = "";
       $("#borrowing-count").textContent = "Could not load records";
       return;
     }
+    if(requestId === borrowingReportRequest) tbody.classList.remove("is-loading");
     if(requestId !== borrowingReportRequest || state.reportType !== "borrowing") return;
     if(REPORT){
       REPORT.recent = data.recent;
@@ -2615,8 +2691,13 @@ async function renderReports(type, opts={}){
   chartWrap.setAttribute("aria-live", type==="overdue" ? "off" : "polite"); // the overdue chart redraws while filtering
   heading.textContent = type==="overdue" ? "Overdue Report" : "Borrowing Report";
   panelTitle.textContent = type==="overdue" ? "Days late, most overdue first" : "Borrowing over the last 7 days";
+  tbody.classList.remove("is-loading");
   try{
-    if(!opts.cached || !REPORT) await loadReport();
+    if(!opts.cached || !REPORT){
+      chartWrap.innerHTML = reportSkeletonHTML();
+      tbody.innerHTML = skeletonRowsHTML(5);
+      await loadReport();
+    }
   }catch(err){
     theadRow.innerHTML = ""; tbody.innerHTML = "";
     errorWithRetry(chartWrap, `Could not load the report: ${err.message}`, ()=> renderReports(type));
@@ -3191,11 +3272,116 @@ function revealApp(){
   tl.from(".site-hero-visual", {opacity:0, y:18, duration:0.55, ease:"power2.out"}, "-=0.4");
   tl.call(()=>{
     renderDashboard();
+    initScrollReveals();
+    initEmblemParallax();
     const start = CONFIG.landingPage || "dashboard";
     if(start !== "dashboard") goToView(start, {force:true, silent:true});
   });
   wireMagnetic(document);
 }
+
+/* ==================================================================
+   MOTION POLISH: header state on scroll, scroll-triggered reveals, emblem parallax,
+   primary-button press feedback, bell nudge. Reduced-motion users get none of the movement,
+   and no content is ever left hidden waiting for an animation.
+   ================================================================== */
+function initHeaderScroll(){
+  const header = $("#app-header");
+  if(!header) return;
+  let queued = false, scrolled = false;
+  // Two thresholds (hysteresis) so the state cannot flicker around a single scroll position.
+  const update = ()=>{
+    queued = false;
+    const y = window.scrollY;
+    if(!scrolled && y > 40) scrolled = true;
+    else if(scrolled && y < 4) scrolled = false;
+    header.classList.toggle("is-scrolled", scrolled);
+  };
+  window.addEventListener("scroll", ()=>{ if(!queued){ queued = true; requestAnimationFrame(update); } }, {passive:true});
+  update();
+}
+
+/* Homepage sections ease in the first time they scroll into view. The hidden starting state is only applied when
+   IntersectionObserver exists and motion is allowed, so nothing can stay invisible. */
+let scrollRevealsReady = false;
+function initScrollReveals(){
+  if(scrollRevealsReady || !("IntersectionObserver" in window) || reducedMotionQuery.matches) return;
+  const root = $("#view-dashboard");
+  if(!root) return;
+  scrollRevealsReady = true;
+  const units = [];
+  $all(".site-section-head, .library-photo-frame", root).forEach(el=> units.push({el, targets:[el]}));
+  const grid = $(".services-grid", root);
+  if(grid) units.push({el:grid, targets:$all(".service-card", grid)});
+  const statement = $(".editorial-statement", root);
+  if(statement) units.push({el:statement, targets:Array.from(statement.children)});
+  const foot = $(".site-footer-top", root);
+  if(foot) units.push({el:foot, targets:Array.from(foot.children)});
+  units.forEach(u=> gsap.set(u.targets, {opacity:0, y:28}));
+  const io = new IntersectionObserver(entries=>{
+    entries.forEach(en=>{
+      if(!en.isIntersecting) return;
+      io.unobserve(en.target);
+      const u = units.find(x=> x.el === en.target);
+      if(u) gsap.to(u.targets, {opacity:1, y:0, duration:0.7, stagger:0.08, ease:"power2.out", clearProps:"opacity,transform"});
+    });
+  }, {threshold:0.15, rootMargin:"0px 0px -6% 0px"});
+  units.forEach(u=> io.observe(u.el));
+}
+
+/* The Tamaraw emblem drifts a few pixels toward the pointer (desktop pointers only). Its idle float is pure CSS. */
+let emblemParallaxReady = false;
+function initEmblemParallax(){
+  if(emblemParallaxReady) return;
+  const hero = $("#site-hero"), emblem = $(".hero-emblem");
+  if(!hero || !emblem || reducedMotionQuery.matches || typeof gsap.quickTo !== "function") return;
+  if(!window.matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+  emblemParallaxReady = true;
+  const qx = gsap.quickTo(emblem, "x", {duration:0.9, ease:"power3.out"});
+  const qy = gsap.quickTo(emblem, "y", {duration:0.9, ease:"power3.out"});
+  hero.addEventListener("mousemove", e=>{
+    const r = hero.getBoundingClientRect();
+    qx(((e.clientX - r.left) / r.width - 0.5) * 18);
+    qy(((e.clientY - r.top) / r.height - 0.5) * 12);
+  });
+  hero.addEventListener("mouseleave", ()=>{ qx(0); qy(0); });
+}
+
+/* Primary buttons already carry a GSAP transform (magnetic hover), which beats CSS :active, so press feedback is a tween. */
+function wirePressFeedback(){
+  let pressed = null;
+  document.addEventListener("pointerdown", e=>{
+    if(reducedMotionQuery.matches || e.button > 0) return;
+    const b = e.target.closest ? e.target.closest(".btn-primary") : null;
+    if(!b || b.disabled) return;
+    pressed = b;
+    gsap.to(b, {scale:0.96, duration:0.1, ease:"power2.out"});
+  });
+  const release = ()=>{
+    if(!pressed) return;
+    const b = pressed;
+    pressed = null;
+    gsap.to(b, {scale:1, duration:0.4, ease:"back.out(2.2)",
+      onComplete:()=>{ if(!b.matches(":hover")) gsap.set(b, {clearProps:"transform"}); }});
+  };
+  document.addEventListener("pointerup", release);
+  document.addEventListener("pointercancel", release);
+}
+
+/* A short bell wiggle when the notification set changes (the dot's pulse is CSS). */
+function nudgeBell(){
+  if(reducedMotionQuery.matches) return;
+  const icon = $("#notif-btn svg");
+  if(!icon) return;
+  gsap.timeline()
+    .to(icon, {rotate:14, transformOrigin:"50% 0%", duration:0.08})
+    .to(icon, {rotate:-12, duration:0.1})
+    .to(icon, {rotate:8, duration:0.1})
+    .to(icon, {rotate:0, duration:0.14, clearProps:"transform"});
+}
+
+initHeaderScroll();
+wirePressFeedback();
 
 /* Keyboard: '/' focuses global search when not typing elsewhere */
 document.addEventListener("keydown", e=>{
@@ -3231,6 +3417,7 @@ $("#login-form").addEventListener("submit", async e=>{
   error.textContent = "";
   error.hidden = true;
   button.disabled = true;
+  button.classList.add("is-saving");
   button.textContent = "Signing in…";
   try {
     await api("auth.php", {
@@ -3249,6 +3436,7 @@ $("#login-form").addEventListener("submit", async e=>{
     error.hidden = false;
   } finally {
     button.disabled = false;
+    button.classList.remove("is-saving");
     button.textContent = "Sign in";
   }
 });
